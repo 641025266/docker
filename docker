@@ -1,0 +1,939 @@
+﻿docker内部没有内核，docker有三个核心概念镜像，容器，仓库一定要理解。
+我们都知道，操作系统分为内核和用户空间。对于 Linux 而言，内核启动后，会挂载 root文件系统为其提供用户空间支持。而 Docker 镜像（Image），就相当于是一个 root 文件系统。
+比如官方镜像 ubuntu:16.04 就包含了完整的一套 Ubuntu 16.04 最小系统的 root 文件系统。
+
+lxc包含如下3个核心概念：
+    chroot，根切换
+    namespace，6个名称空间（即在同一个名称内核下，有多个用户空间）
+    cgroups，控制组
+lxc可以当做完整的虚拟机来使用，但是安装比较麻烦，刚开始docker相当于是lxc的一个前端管理器，让lxc更加容易使用，但是docker和lxc又有很大的区别，docker只是为了运行特定的应用程序
+docker的分层镜像，除了支持aufs，docker还支持btrfs，devicemapper和vfs等；centos系统的docker用的是devicemapper（设备映射）
+
+与Docker有关的概念：
+   1)Docker是一个开源的，基于LXC的高级容器引擎，让开发者可以打包他们的应用以及依赖包到一个可移植的容器中，然后发布到Linux机器上。
+   2)Docker是一个开源的应用容器引擎，也就是说docker利用了容器，
+   3)Docker的生命周期是从创建到销毁，所以其数需要存放在另外一个单独节点上；前期基于lxc即linux container的封装，后期是libcontainer
+   4)Docker技术可以把应用程序自身和应用程序依赖的环境打包成一个文件，然后就可以直接应用了，联想xen的安装环境或者实现一块单独硬盘的启动过程
+   5)Docker的原生设计目的就是单独跑专门的一个程序的
+   6)LXC旨在提供一个共享kernel的 OS 级虚拟化方，所以docker属于操作系统级虚拟化,docker源代码托管在 Github上
+   7)无论是KVM还是Xen，在docker 看来都在浪费资源，因为用户需要的是高效运行环境而非OS, GuestOS既浪费资源又难于管理, 更加轻量级的LXC更加灵活和快速
+   8)LXC的移动性，由于缺少标准化的描述手段和容器的可迁移性，决定其构建出的环境难于迁移和标准化管理(相对于KVM之类image和snapshot的概念)。
+     docker 就在这个问题上做出实质性的革新。这是docker最独特的地方。
+   9)容器与镜像的关系类似于面向对象编程中的对象与类
+  10)选用container还是vm, 就是在隔离性和资源复用性上做权衡
+  11)Docker实例是无状态的。这意味着它们不应该承载任何交易数据，所有数据应该保存在数据库服务器中。
+  12)Docker核心解决的问题是利用LXC来实现类似VM的功能
+  13)硬件虚拟化的方法因为虚拟化的水平比较高，用户进程都是在KVM等虚拟机容器中翻译运行的, 
+     然而对于LXC, 用户的进程是lxc-start进程的子进程, 只是在Kernel的namespace中隔离的, 因此需要一些kernel的patch来保证用户的运行环境不会受到来自host主机的恶意入侵, 
+     dotcloud利用kernel grsec patch来解决该问题
+  14)LXC所实现的隔离性主要是来自kernel的namespace, 其中pid, net, ipc, mnt, uts，user等namespace将container的进程, 网络, 消息, 文件系统和hostname隔离开
+     有了以上6种namespace从进程、网络、IPC、文件系统、UTS和用户角度的隔离，一个container就可以对外展现出一个独立计算机的能力，并且不同container从OS层面实现了隔离。 
+     然而不同namespace之间资源还是相互竞争的，仍然需要类似ulimit来管理每个container所能使用的资源 - LXC 采用的是cgroup
+  15)借助于namespace的隔离机制和cgroup限额功能，LXC提供了一套统一的API和工具来建立和管理container
+  16)Docker对container的使用基本是建立在LXC基础之上的，然而LXC存在的问题是难以移动，难以通过标准化的模板制作、重建、复制和移动 container
+     Docker正是利用AUFS来实现对container的快速更新的
+  17)采用AUFS作为docker的container的文件系统，能够提供的好处有节省存储空间（多个container可以共享base image存储）和快速部署
+
+
+Docker从如下4方面满足用户虚拟化需求
+   隔离性 - 每个用户实例之间相互隔离, 互不影响。 硬件虚拟化方法给出的方法是VM, LXC给出的方法是container，更细一点是kernel namespace
+   可配额/可度量 - 每个用户实例可以按需获得计算资源，所使用的资源可以被计量。硬件虚拟化方法因为虚拟了CPU, memory可以方便实现, LXC则主要是利用cgroups来控制资源
+   移动性 - 用户的实例可以很方便地复制、移动和重建。硬件虚拟化方法提供snapshot和image来实现，docker(主要)利用AUFS实现
+   安全性 - 这个话题比较大，这里强调的是从host主机的角度尽量保护container。
+
+
+容器技术就是隔离用户空间（或称为用户空间虚拟化）
+用户空间的虚拟化隔离效果没有主机虚拟化的效果好
+电脑资源：CPU，内存，IO
+	
+pstree命令，进程树概念
+
+
+docker history <imageId> 查看某个镜像各层内容及对应大小，每层对应着 Dockerfile 中的一条指令
+Docker 镜像默认存储在 /var/lib/docker/<storage-driver>
+
+
+NameSpace分类：
+
+	NameSpace属于内核级别，环境隔离；
+	
+	
+    PID NameSpace：Linux 2.6.24，PID隔离
+	
+    Network NameSpace：Linux 2.6.29，网络设备、网络栈、端口等网络资源隔离
+	
+    User NameSpace：Linux 3.8（也就是centos6不能实现用户名称空间，需要centos7才可以），用户和用户组资源隔离
+	
+    IPC NameSpace：Linux 2.6.19，信号量、消息队列和共享内存的隔离
+	
+    UTS NameSpace：Linux 2.6.19，主机名和域名的隔离；
+UTS(“UNIX Time-sharing System”) namespace允许每个container拥有独立的hostname和domain name, 	
+    Mount NameSpace：Linux 2.4.19，挂载点隔离，即文件系统隔离；
+	
+	
+    API：clone()（用来实现复制出一个线程）, setns(), unshare()；
+
+	
+
+CGroup：Linux Control Group, 控制组(所谓的控制组就是，不同的组里面有不同的cpu和内存，IO）， Linux 2.6.24，内核级别，限制、控制与一个进程组群的资源；
+	
+CGroup功能：
+		
+   Resource limitation：资源限制；
+		
+   Prioritization：优先级控制；
+		
+   Accounting：审计和统计，主要为计费；
+		
+   Control：挂起进程，恢复进程；
+		
+	
+  /sys/fs/cgroup
+	
+     mount
+
+	
+CGroups的子系统（subsystem）：
+	使用lssubsys -m
+命令进行查看（centos7才有的命令）
+   blkio：设定块设备的IO限制；
+		
+   cpu：设定CPU的限制；
+		
+   cpuacct：报告cgroup中所使用的CPU资源；
+		
+   cpuset：为cgroup中的任务分配CPU和内存资源；
+		
+   memory：设定内存的使用限制；
+		
+   devices：控制cgroup中的任务对设备的访问；
+		
+   freezer（冻结意思）：挂起或恢复cgroup中的任务；
+		
+   net_cls：（classid），使用等级级别标识符来标记网络数据包，以实现基于tc(traffic control,即流量控制）完成对不同的cgroup中产生的流量的控制；
+		
+   perf_event：使用后使cgroup中的任务可以进行统一的性能测试；
+		
+   hugetlb：对HugeTLB（即大内存页，默认是4K的页框的，最大可以支持2M）系统进行限制；
+
+58-1,49分钟
+
+CGroups中的术语：
+		
+    task（任务）：进程或线程；
+		
+    cgroup：一个独立的资源控制单位，可以包含一个或多个子系统；
+		
+    subsystem：子系统
+		
+    hierarchy：层级
+	
+
+
+AUFS：	
+      docker强依赖AUFS
+      UnionFS：表示联合文件系统，由内核实现，但是还没有被收录进内核，把不同的物理位置的目录合并到同一个目录中
+               (实现机制是叠加，有先后顺序，只有最上层的目录可以写，底层目录只能实现读）。
+	
+	
+      Another UFS、Alternative UFS、Adanced UFS
+--前面3者由UnionFS发展来
+
+Device mapper：
+	Linux 2.6内核引入的最重要的技术之一，用于在内核中支持逻辑卷管理的通用设备映射机制；
+
+Device mapper的3种实现方式：		
+   Mapped Device
+（被映射出来的设备）		
+   Mapping Table
+		
+   Target Device
+（元设备）
+		
+
+
+2013, GO, Apache 2.0, dotCloud
+
+
+
+58-2	
+C/S架构:
+    Docker Client: 发起docker相关的请求；
+    Docker Server: 容器运行的节点；
+核心组件：
+     docker client：docker的客户端工具，是用户使用docker的主要接口，docker client与docker daemon通信并将结果返回给用户；
+     docker deamon：运行于宿主机上，Docker守护进程，用户可通过docker client与其交互；
+     image：镜像文件是只读的；用来创建container，一个镜像可以运行多个container；镜像文件可以通过Dockerfile文件创建，也可以从docker hub/registry下载；
+     docker link：（docker之间的通信，参考虚拟化网络）		
+     docker volume：
+docker数据卷	     
+repository
+       公共仓库：Docker hub（集线器，仓库）/registry
+       私有仓库：docker registry
+docker container：docker的运行实例，容器是一个隔离环境； 
+docker的安装：
+关闭掉iptables，firewalld，selinux  
+]# yum install docker -y             在Centos6的epel源里面，在Centos7的extra源里面
+]# vi /etc/docker/daemon.json  配置国内源，后面在使用docker pull命令时速度会很快，否则默认是到docker官方拉取，速度慢
+{
+"registry-mirrors": [
+"https://registry.docker-cn.com"
+]
+}
+]# systemctl start docker.service 
+docker常用命令
+docker --help
+Commands:
+    attach    Attach to a running container  连接到一个运行中的容器中去
+    build     Build an image from a Dockerfile
+    commit    Create a new image from a container's changes   基于运行中的container创建一个新的image
+    cp        Copy files/folders between a container and the local filesystem
+    create    Create a new container
+    diff      Inspect changes on a container's filesystem
+    events    Get real time events from the server
+    exec      Run a command in a running container
+    export    Export a container's filesystem as a tar archive   把一个容器导出为tar包
+    history   Show the history of an image
+    images    List images
+    import    Import the contents from a tarball to create a filesystem image  从tar导出镜像文件
+    info      Display system-wide information
+    inspect   Return low-level information on a container, image or task
+    kill      Kill one or more running containers
+    load      Load an image from a tar archive or STDIN  把tar包转换为镜像，docker load  < /path/name.tar 主要和save命令配合使用
+    login     Log in to a Docker registry.
+    logout    Log out from a Docker registry.
+    logs      Fetch the logs of a container
+    network   Manage Docker networks
+    node      Manage Docker Swarm nodes
+    pause     Pause all processes within one or more containers
+    port      List port mappings or a specific mapping for the container  查看端口映射
+    ps        List containers   查看运行中的容器
+    pull      Pull an image or a repository from a registry
+    push      Push an image or a repository to a registry
+    rename    Rename a container
+    restart   Restart a container
+    rm        Remove one or more containers  删除容器
+    rmi       Remove one or more images      删除镜像
+    run       Run a command in a new container  run命令相当于把特定文件系统在本地展开
+    save      Save one or more images to a tar archive (streamed to STDOUT by default)  把镜像文件打包成tar文件，然后scp给其他主机使用，docker save imagename > /path/name.tar
+    search    Search the Docker Hub for images	从Docker hub查找镜像文件
+    service   Manage Docker services
+    start     Start one or more stopped containers
+    stats     Display a live stream of container(s) resource usage statistics
+    stop      Stop one or more running containers
+    swarm     Manage Docker Swarm
+    tag       Tag an image into a repository
+    top       Display the running processes of a container
+    unpause   Unpause all processes within one or more containers
+    update    Update configuration of one or more containers
+    version   Show the Docker version information
+    volume    Manage Docker volumes  可以查看docker在/var/lib/docker下面的数据卷
+    wait      Block until a container stops, then print its exit code
+
+命令使用案例
+[root@compute1 ~]# docker search centos 
+INDEX       NAME                                         DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+docker.io   docker.io/centos                             The official build of CentOS.                   3587      [OK]       
+docker.io   docker.io/ansible/centos7-ansible            Ansible on Centos7                              100                  [OK]
+docker.io   docker.io/jdeathe/centos-ssh                 CentOS-6 6.9 x86_64 / CentOS-7 7.3.1611 x8...   81                   [OK]
+                     中间的ansible和jdeathe表示用户名，后面的centos7-ansible和centos-ssh表示该用户创建的镜像文件
+[root@compute1 ~]# docker search  busybox 
+[root@compute1 ~]# docker pull  busybox 
+Using default tag: latest
+Trying to pull repository docker.io/library/busybox ... 
+latest: Pulling from docker.io/library/busybox
+add3ddb21ede: Pull complete 
+Digest: sha256:b82b5740006c1ab823596d2c07f081084ecdb32fd258072707b99f52a3cb8692
+[root@compute1 ~]# docker images
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+docker.io/busybox   latest              d20ae45477cb        2 days ago          1.129 MB
+[root@compute1 ~]# docker run -it  busybox:latest /bin/sh    --rm 表示停止时自动删除
+/ # ls   如果在container内执行exit，那么退出container后container就停止了；但是执行control+p，然后control+q退回container后，container还可以继续运行
+bin   dev   etc   home  proc  root  run   sys   tmp   usr   var
+[root@compute1 .ssh]# docker ps 
+CONTAINER ID        IMAGE               COMMAND             CREATED              STATUS              PORTS               NAMES
+0e2c6d3512f9        busybox:latest      "/bin/sh"           About a minute ago   Up About a minute                       loving_borg
+[root@compute1 ~]# docker  stop   0e2c6d3512f9  0e2c6d3512f9表示CONTAINER ID 
+0e2c6d3512f9
+[root@compute1 ~]# docker ps -a           表示显示所有containers，包括已经停止的
+CONTAINER ID        IMAGE               COMMAND             CREATED             STATUS                       PORTS               NAMES
+29308cd30a51        centos:latest       "/bin/bash"         2 minutes ago       Up 2 minutes                                     serene_banach
+0e2c6d3512f9        busybox:latest      "/bin/sh"           21 minutes ago      Exited (137) 7 minutes ago                       loving_borg
+[root@compute1 ~]# docker rm 0e2c6d3512f9 删除容器
+0e2c6d3512f9
+[root@compute1 ~]# docker commit -p 6a8a4611a172  busybox:new    基于运行中container创建一个新的image,创建镜像时最好加-p表示暂停
+sha256:b207ec158acec8b398a06b6cfc160ce18b05f5b3b028a69eafd190c820a0cefa
+[root@compute1 ~]# docker images
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+busybox             new                 b207ec158ace        7 seconds ago       1.129 MB
+docker.io/busybox   latest              d20ae45477cb        2 days ago          1.129 MB
+docker.io/centos    latest              328edcd84f1b        3 weeks ago         192.5 MB
+[root@compute1 ~]# ifconfig  
+docker0: flags=4099<UP,BROADCAST,MULTICAST>  mtu 1500
+        inet 172.17.0.1  netmask 255.255.0.0  broadcast 0.0.0.0
+        ether 02:42:47:93:14:d7  txqueuelen 0  (Ethernet)
+        RX packets 0  bytes 0 (0.0 B)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 0  bytes 0 (0.0 B)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+启动一个容器后，容器会自动关联到docker0桥设备上去，该docker0桥设备是程序自动创建的并且做了nat规则，在docker0上启动了一个dhcp服务，可以访问互联网	
+总结：
+   安装，启动服务；
+   docker hub注册账号；	   
+   获取镜像；	
+   启动容器；
+说明：busybox image中有ifconfig命令，但是centos image中没有ifconfig命令
+58-3
+dockerfile：
+回顾：
+     container:
+     namespace：network, pid, ipc, user, uts, mount
+     cgroups ：子系统，cpu, memory, cpuset, cpuacct, ...
+     lxc, openvz
+     docker：	
+        lxc
+        libcontainer
+安装：
+  CentOS 6：epel
+  CentOS 7: extra		
+  docker-engine
+Docker功能：
+    轻量级的虚拟化		
+    隔离应用	
+    维护镜像
+    创建易于分发的应用	
+    快速扩展
+Docker的4个重要组件：
+   容器	docker client和docker domain	
+   镜像img   	
+   链接docker link	
+   数据卷docker volume
+每个docker daemon都应该有的两个组件：
+  graph组件用于维护已下载的image之间的连接关系
+  graphDB组件用于维护container容器之间的连接关系
+Docker应用：
+   镜像：包含了启动Docker容器所需要的文件系统层级及其内容；基于UnionFS采用分层结构实现，包含bootfs，rootfs
+   注册表registry：保存docker镜像及镜像层次结构和元数据；registry包含一个或多个repository）
+   仓库repository：由具有某个功能的镜像的所有相关版本构成的集合；一个repository包含多个镜像文件）			
+   index：管理用户的账号、访问权限、镜像及镜像标签等等相关的信息；
+   graph：从registry中下载的Docker镜像需要保存在本地，此功能即由graph完成；/var/lib/docker/graph,
+与镜像相关的命令：			       
+       images			
+       search			
+       pull			
+       push			
+       login
+ 需要在docker的官网上注册一个账号			
+       logout
+       创建镜像：commit, build（build基于dockerfile来实现）	
+       删除本地镜像：rmi
+容器本质就是用来运行应用的，一旦应用结束，容器就停止。
+容器是独立运行的一个或一组应用，以及它们运行的环境；
+容器就是运行中的镜像文件，容器就是docker实列
+与container容器相关的命令：run, kill, stop, start, restart，log，export, import		
+   启动方法：
+        通过镜像创建一个新的容器；run
+        启动一个处于停止状态的容器；start				
+        run命令：
+          --name=                      Assign a name to the container
+          -i, --interactive=false      Keep STDIN open even if  not attached 进入交互式模式
+          -t, --tty=false              Allocate a pseudo-TTY
+          --network		       Set the Network  for the container
+          -d, --detach=false           Run container in background and print container ID  运行于后台	
+步骤：
+   检查本地是否存在指定的镜像，不存在则从registry下载；			
+   利用镜像启动容器
+   分配一个文件系统，并且在只读的镜像层之外挂载一个可读写层--重要，即unionFS文件系统
+   从宿主机配置的网桥接口桥接一个虚拟接口给此容器--重要，即docker0桥设备	
+   从地址池中分配一个地址给容器；		
+   执行用户指定的应用程序；
+   程序执行完成后，容器即终止；
+对于交互式模式启动的容器，终止可使用exit命令或ctrl+d组合键；
+docker logs   containerid/name ：获取一个容器的日志，获取其输出信息,也就是你在容器中做的所有操作都可以查看到，有点类似history命令；
+docker attach containerid/name ：连接到一个运行中的容器；
+attach命令使用案例：建议后续都使用exec命令，不要使用attach命令
+[root@compute1 ~]# docker run -it  busybox:latest  /bin/sh 
+/ # ls 
+bin   dev   etc   home  proc  root  run   sys   tmp   usr   var
+/ # exit --容器被终止了
+[root@compute1 ~]# docker ps -a 
+CONTAINER ID        IMAGE               COMMAND             CREATED             STATUS                     PORTS               NAMES
+2d5cf6ab688e        busybox:latest      "sh"                12 seconds ago      Exited (0) 4 seconds ago                       jovial_kowalevski
+[root@compute1 ~]# docker start 2d5cf6ab688e 针对已经停止的docker启动
+2d5cf6ab688e
+[root@compute1 ~]# docker ps 
+CONTAINER ID        IMAGE               COMMAND             CREATED              STATUS              PORTS               NAMES
+2d5cf6ab688e        busybox:latest      "sh"                About a minute ago   Up 2 seconds                            jovial_kowalevski
+[root@compute1 ~]# docker attach 2d5cf6ab688e   只能连接到一个运行中的容器
+/ # ls 
+bin   dev   etc   home  proc  root  run   sys   tmp   usr   var
+/ # exit 
+58-4			
+registry有两种：
+      docker hub：对应的就是hub.docker.com，本质就是一个public registry，在docker hub上创建一个账号后可以把自己的镜像推到自己的账号里面		
+      private registry
+私有仓库的服务器端					
+(1) 安装docker-registry程序包；
+    yum install docker-registry -y  (实际安装的是docker-distribution）				
+(2) 启动服务：
+     systemctl  start  docker-distribution.service
+(3) 补充说明：建议使用nginx反代，使用ssl，基于basic做用户认证。可以使用nginx做反代，说明是http协议
+在使用私有仓库前，docker客户端需要做的配置步骤：
+yum install -y docker 					
+(1) vim  /etc/sysconfig/docker  该配置文件由docker-common生成  
+       ADD_REGISTRY='--add-registry 172.16.100.68:5000'
+       INSECURE_REGISTRY='--insecure-registry 172.16.100.68:5000'    不安全的registry就表示使用http，默认是使用https，否则后续的push命令不能成功
+       systemctl restart docker.service 						
+(2) push镜像
+    (a) tag命令：给要push到私有仓库的镜像打标签；
+	docker  tag  IMAGE_ID  REGISRY_HOST:PORT/NAME[:TAG]
+    (b) push命令：
+        docker  push  REGISRY_HOST:PORT/NAME[:TAG]
+(3) pull镜像
+    docker  pull  REGISRY_HOST:PORT/NAME[:TAG]
+私有仓库的具体使用案例：
+[root@compute1 ~]# docker tag d20ae45477cb  192.168.139.183:5000/busybox:v1   先要给镜像打好标签好才能进行push
+[root@compute1 ~]# docker images 
+REPOSITORY                     TAG                 IMAGE ID            CREATED             SIZE
+busybox                        new                 b207ec158ace        14 hours ago        1.129 MB
+192.168.139.183:5000/busybox   v1                  d20ae45477cb        3 days ago          1.129 MB
+docker.io/busybox              latest              d20ae45477cb        3 days ago          1.129 MB
+docker.io/centos               latest              328edcd84f1b        3 weeks ago         192.5 MB
+[root@compute1 ~]# docker  push  192.168.139.183:5000/busybox:v1  实际上完整的镜像格式应该为ip:prot/user/name:tag
+The push refers to a repository [192.168.139.183:5000/busybox]
+6a749002dd6a: Pushed 
+v1: digest: sha256:b82b5740006c1ab823596d2c07f081084ecdb32fd258072707b99f52a3cb8692 size: 527
+[root@compute1 ~]# docker rmi  192.168.139.183:5000/busybox:v1 
+Untagged: 192.168.139.183:5000/busybox:v1
+Untagged: 192.168.139.183:5000/busybox@sha256:b82b5740006c1ab823596d2c07f081084ecdb32fd258072707b99f52a3cb8692
+[root@compute1 ~]# docker images 
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+busybox             new                 b207ec158ace        15 hours ago        1.129 MB
+docker.io/busybox   latest              d20ae45477cb        3 days ago          1.129 MB
+docker.io/centos    latest              328edcd84f1b        3 weeks ago         192.5 MB
+[root@compute1 ~]# docker pull   192.168.139.183:5000/busybox:v1  尝试去下载镜像
+Trying to pull repository 192.168.139.183:5000/busybox ... 
+v1: Pulling from 192.168.139.183:5000/busybox
+Digest: sha256:b82b5740006c1ab823596d2c07f081084ecdb32fd258072707b99f52a3cb8692
+[root@compute1 ~]# docker  images 
+REPOSITORY                     TAG                 IMAGE ID            CREATED             SIZE
+busybox                        new                 b207ec158ace        15 hours ago        1.129 MB
+192.168.139.183:5000/busybox   v1                  d20ae45477cb        3 days ago          1.129 MB
+docker.io/busybox              latest              d20ae45477cb        3 days ago          1.129 MB
+docker.io/centos               latest              328edcd84f1b        3 weeks ago         192.5 MB
+能成功push和pull镜像文件，但是无法实现search搜索功能
+]# docker push 10.10.214.10:5000/kafka:1.0.0
+The push refers to repository [10.10.214.10:5000/kafka]
+ae406f354908: Pushed
+284c3b30ebfe: Pushed
+9ef6dcb60c5e: Pushed
+fbc1c211dc39: Pushed
+fcca3a801254: Pushed
+3377865f3d33: Pushed
+b6e0bef3e75c: Pushed
+e58f214fae4f: Pushed
+2b0fb280b60d: Pushed
+1.0.0: digest: sha256:2762baaf74912cacc884b2a8799e0b69edb8eee72b764308d21bf2138623dfba size: 2202
+[root@qbs ~]# curl http://10.10.214.10:5000/v2/_catalog
+{"repositories":["kafka"]}
+上面registry虽然已经运行起来了，但是如果想用push命令上传镜像是会报错的，需要在配置文件中指定registry的地址。在/etc/sysconfig/docker文件中添加一下配置：
+[plain] view plain copy
+ADD_REGISTRY='--insecure-registry 192.168.0.100:5000' 
+]# curl http://10.10.214.10:5000/v2/kafka/tags/list
+{"name":"kafka","tags":["1.0.0"]}
+root@f06b2fe7ee1f:/# cat  /etc/docker/registry/config.yml
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+    delete:
+        enabled: true
+    cache:
+        blobdescriptor: inmemory
+    filesystem:
+        rootdirectory: /var/lib/registry
+http:
+    addr: :5000
+    headers:
+        X-Content-Type-Options: [nosniff]
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3
+method	path	Entity	Description
+GET	/v2/	Base	Check that the endpoint implements Docker Registry API V2.
+GET	/v2/<name>/tags/list	Tags	Fetch the tags under the repository identified by name.
+GET	/v2/<name>/manifests/<reference>	Manifest	Fetch the manifest identified by nameand referencewhere referencecan be a tag or digest. A HEADrequest can also be issued to this endpoint to obtain resource information without receiving all data.
+PUT	/v2/<name>/manifests/<reference>	Manifest	Put the manifest identified by nameand referencewhere referencecan be a tag or digest.
+DELETE	/v2/<name>/manifests/<reference>	Manifest	Delete the manifest identified by nameand reference. Note that a manifest can only be deleted by digest.
+GET	/v2/<name>/blobs/<digest>	Blob	Retrieve the blob from the registry identified bydigest. A HEADrequest can also be issued to this endpoint to obtain resource information without receiving all data.
+DELETE	/v2/<name>/blobs/<digest>	Blob	Delete the blob identified by nameand digest
+POST	/v2/<name>/blobs/uploads/	Initiate Blob Upload	Initiate a resumable blob upload. If successful, an upload location will be provided to complete the upload. Optionally, if thedigest parameter is present, the request body will be used to complete the upload in a single request.
+GET	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Retrieve status of upload identified byuuid. The primary purpose of this endpoint is to resolve the current status of a resumable upload.
+PATCH	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Upload a chunk of data for the specified upload.
+PUT	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Complete the upload specified by uuid, optionally appending the body as the final chunk.
+DELETE	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Cancel outstanding upload processes, releasing associated resources. If this is not called, the unfinished uploads will eventually timeout.
+GET	/v2/_catalog	Catalog	Retrieve a sorted, json list of repositories available in the registry.
+Docker的数据卷Data Volume
+
+]# docker exec -it registry1  rm -rf /var/lib/registry/docker/registry/v2/repositories/local_mysql
+]# docker exec -it registry1  du -sh  /var/lib/registry/
+99M	/var/lib/registry/
+[root@qbs docker]# docker exec -it registry1  registry garbage-collect /etc/docker/registry/config.yml
+
+
+是供一个或多个容器使用的文件或目录，有多种特性：
+      数据卷本质是映射了宿主机的一个目录，所有的数据都是保存在该宿主机的目录里面，因此实现了持久存储				
+      可以共享于多个容器之间；
+      对数据卷的修改会立即生效；
+      对数据卷的更新与镜像无关；	
+      数据卷会一直存在；
+使用数据卷的方式：	    
+  (1)run  -v  /MOUNT_POINT   MOUNT_POINT对应的路径是container上的路径，此时默认映射的宿主机路径是/var/lib/docker/volumes/
+  (2)run  -v  /HOST/DIR:/CONTAINER/DIR     主要用于再次启动容器，/HOST/DIR表示宿主机路径，/CONTAINER/DIR表示容器上的路径，
+    比如/var/lib/docker/volumes/290ed1c639592214a4f40d560b9abe5575627682ae1ad37a43e32633bdf79b7b/_data:/data      
+  (3) 在Dockerfile中使用VOLUME指令定义；	
+ （4）在容器之间共享卷：
+       run --volumes-from=[]（此处填写跟容器名），Mount volumes from the specified container(s)
+删除卷：		
+           docker  rm  -v  CONTAINER_NAME
+删除容器的同时删除其卷；
+           docker  run --rm                表示容器关闭会被自动删除，同时删除其卷，只有此容器为最后一个使用此卷的容器时才会删除卷，否则卷不会被删除；
+数据卷的具体使用案例：
+[root@compute1 ~]# docker run -it -v /data  busybox:latest  /bin/sh 
+/ # cp /etc/hosts /data/
+/ # cat /data/hosts 
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.17.0.2	e4e1416612a5
+/ # exit 
+[root@compute1 ~]# docker run -it -v /var/lib/docker/volumes/c82db399f35dd86c7c1ca454f82752658f01e50044d84c38c0b7a4b6c008ff50/_data:/data  busybox:latest 
+/ # cat /data/hosts 
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.17.0.2	e4e1416612a5
+备份和恢复：			
+   备份：
+   docker  run  --rm  --volumes-from  vol_container（卷所在的另外一个容器名）  -v  $(pwd):/backup  busybox:latest  tar  cvf  /backup/data.tar  /data	
+   实际上可以在物理机上直接备份
+docker网络
+    支持的网络模型
+       bridge模式
+           -net=BRIDGE-NAME，创建一对网卡，一半在宿主机上，一半在容器中
+       host模式
+           -net=host
+      container模式
+      none模式，表示不使用网络
+容器互联：
+   run   --link
+58.2-1
+回顾：
+   容器技术；
+   docker client/docker daemon
+   docker image-->docker repostitory--docker registry			
+   docker container；
+   volume：实现数据持久存储	
+   单一程序：
+   集装箱：
+    test.java
+Docker Network模型：
+     1）closed container： 仅有一个接口：loopback，不参与网络通信，仅适用于无须网络通信的应用场景，例如备份、程序调试等；
+	run --network  none
+     2）bridged container:此类容器都有两个接口：这是docker的默认形式			
+             2.1) 本地loopback		
+             2.2）以太网接口：桥接至docker daemon设定使用的桥，默认为docker0；	       
+             run --network  bridge 
+             run -h|--hostname  HOSTNAME 修改主机名
+             run --dns  DNS_SERVER_IP
+             run --add-host  "HOSTNAME:IP"（本质是增加container中/etc/hosts中的解析条目） 			
+             docker0 NAT桥模型上的容器发布给外部网络访问：
+             -p选项同时还修改了iptables规则				
+             -p  <containerPort>  仅给出了容器端口，表示将指定的容器端口映射至宿主机上的某随机端口；
+	     -p  <hostPort>:<containerPort>   将宿主机的<hostPort>映射为容器的<containerPort>
+	     -p  <hostIP>::<containerPort>     将指定主机的其中一个<IP>上的某随机端口映射为容器的<containerPort>
+	     -p  <hostIP>:<hostPort>:<containerPort> 将指定主机的其中一个<IP>上的端口<hostPort>映射为容器的<containerPort>
+	     -P, --publish-all  大写P，发布所有的端口，跟--expose选项一起指明要暴露出外部的端口，--expose可以出现多次；
+             比如 -P --expose 443  --expose 80  等效于 -p 443:443 -p 80:80 
+             如果不想启动容器时使用默认的docker0桥接口，需要在运行docker daemon命令时使用 -b选项，表示要指明要使用桥，使用docker help  daemon查看帮助选项
+      3）联盟式容器：启动一个容器时，让其使用某个已经存在的容器的网络名称空间，主要用于监控作用；
+	 run --network container:CONTAINER_NAME 
+      4）开放式容器：容器使用宿主机Host的网络名称空间；
+	 run --network  host
+bridged container模型端口发布的使用案例
+[root@compute1 ~]# docker run -it --rm  -p 8033:80  busybox:latest /bin/sh 
+/ # httpd -h 
+httpd: option requires an argument -- h
+BusyBox v1.27.2 (2017-08-22 23:59:28 UTC) multi-call binary.
+Usage: httpd [-ifv[v]] [-c CONFFILE] [-p [IP:]PORT] [-u USER[:GRP]] [-r REALM] [-h HOME]
+or httpd -d/-e/-m STRING
+Listen for incoming HTTP requests
+
+	-i		Inetd mode
+	-f		Don't daemonize
+	-v[v]		Verbose
+	-p [IP:]PORT	Bind to IP:PORT (default *:80)
+	-u USER[:GRP]	Set uid/gid after binding to port
+	-r REALM	Authentication Realm for Basic Authentication
+	-h HOME		Home directory (default .)
+	-c FILE		Configuration file (default {/etc,HOME}/httpd.conf)
+	-m STRING	MD5 crypt STRING
+	-e STRING	HTML encode STRING
+	-d STRING	URL decode STRING
+/ # mkdir /var/www/html
+/ # vi /var/www/html/index.html  内容为this is from web container
+/ # httpd -f -v  -h /var/www/html/ 
+[::ffff:192.168.139.181]:42070: response:200
+
+在宿主机192.168.139.181上执行如下操作
+[root@compute1 ~]# curl http://192.168.139.181:8033  一定要访问的是宿主机的ip地址
+this is from web container
+[root@compute1 ~]# docker ps 
+CONTAINER ID        IMAGE               COMMAND             CREATED             STATUS              PORTS                  NAMES
+08c6faf33e35        busybox:latest      "/bin/sh"           5 minutes ago       Up 5 minutes        0.0.0.0:8033->80/tcp   mad_wing
+[root@compute1 ~]# docker port 08c6faf33e35  查看映射端口情况
+80/tcp -> 0.0.0.0:8033
+[root@compute1 ~]# docker ps -a 
+CONTAINER ID        IMAGE               COMMAND             CREATED             STATUS              PORTS                  NAMES
+08c6faf33e35        busybox:latest      "/bin/sh"           30 minutes ago      Up 29 minutes       0.0.0.0:8033->80/tcp   mad_wing
+联盟式容器的使用案例：
+[root@compute1 ~]# docker run -it --rm --network container:mad_wing    busybox:latest 
+/ # ifconfig  此时该容器的eth0地址和container:mad_wing内的eth0地址完全是一样的
+eth0      Link encap:Ethernet  HWaddr 02:42:AC:11:00:02  
+          inet addr:172.17.0.2  Bcast:0.0.0.0  Mask:255.255.0.0
+          inet6 addr: fe80::42:acff:fe11:2/64 Scope:Link
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:16 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:16 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0 
+          RX bytes:1220 (1.1 KiB)  TX bytes:1351 (1.3 KiB)
+
+开放式容器		
+[root@compute1 ~]# docker run -it --rm --network host centos:latest 
+[root@compute1 /]# yum install -y iproute   centos镜像没有ip和ifconfig命令，但是通过--network host就可以通过yum命令安装了
+[root@compute1 /]# ip addr show             此时该命令显示出来的内容和宿主机192.168.139.181上面显示的内容是一样
+容器间的依赖关系：
+   链接机制：linking
+     --link
+     同时也表明了先后关系，被依赖的要先启动	
+容器互联的使用案例：
+[root@www ~]# docker run -it   busybox  /bin/sh
+/ # ifconfig 
+eth0      Link encap:Ethernet  HWaddr 02:42:AC:11:00:02  
+          inet addr:172.17.0.2  Bcast:0.0.0.0  Mask:255.255.0.0
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:10 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0 
+          RX bytes:1148 (1.1 KiB)  TX bytes:0 (0.0 B)
+
+lo        Link encap:Local Loopback  
+          inet addr:127.0.0.1  Mask:255.0.0.0
+          UP LOOPBACK RUNNING  MTU:65536  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0 
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+
+再开另外一个终端
+[root@www chenhao]# docker ps -a 
+CONTAINER ID        IMAGE               COMMAND             CREATED             STATUS                      PORTS               NAMES
+f65b48f0d976        busybox             "/bin/sh"           9 minutes ago       Up 9 minutes                                    agitated_elion
+[root@www chenhao]# docker run -it  --link=agitated_elion:busybox3   busybox  /bin/sh    此处agitated_elion是之前那个容器的名称，后面的busybox3是agitated_elion的别名
+/ # ifconfig 
+eth0      Link encap:Ethernet  HWaddr 02:42:AC:11:00:03  
+          inet addr:172.17.0.3  Bcast:0.0.0.0  Mask:255.255.0.0
+          UP BROADCAST RUNNING MULTICAST  MTU:1500  Metric:1
+          RX packets:6 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0 
+          RX bytes:508 (508.0 B)  TX bytes:0 (0.0 B)
+
+lo        Link encap:Local Loopback  
+          inet addr:127.0.0.1  Mask:255.0.0.0
+          UP LOOPBACK RUNNING  MTU:65536  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:0 
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+
+/ # ping busybox3 
+PING busybox3 (172.17.0.2): 56 data bytes
+64 bytes from 172.17.0.2: seq=0 ttl=64 time=30.910 ms
+64 bytes from 172.17.0.2: seq=1 ttl=64 time=0.162 ms
+。。。。。。。。。。。。。。。。。。。。。。。。。。。。
+--- busybox3 ping statistics ---
+4 packets transmitted, 4 packets received, 0% packet loss
+round-trip min/avg/max = 0.161/7.852/30.910 ms
+/ # cat /etc/hosts 
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.17.0.2	busybox3 f65b48f0d976 agitated_elion
+172.17.0.3	ab93c7fc7e55  实际就是在/etc/hosts里面增加了一个条目
+补充命令：
+   docker cp registry:/go/src/github.com/docker/distribution/cmd/registry/config.yml   . 此命令可以把容器名称为registry内的文件拷贝到宿主机来
+容器的资源限制：		
+   run命令的选项：
+      -m	
+      --cpuset-cpus 		
+      --shm-size 	
+      ...
+docker的监控命令：	
+          ps命令：
+              -a：查看所有的容器		
+              images命令：查看当前主机的镜像信息； 
+              stats命令：容器状态统计信息，实时监控容器的运行状态；
+              inspect -f, --format {{.key1.key2....}}命令：查看镜像或容器的底层详细信息；类似/keys1/keys2/..	,inspect表示检查		  
+              top命令：用于查看正在运行的容器中的进程的运行状态；
+              port命令：查看端口映射；
+监控工具：google/cadvisor镜像,该镜像可以以图形界面的方式展示资源使用情况
+[root@compute1 ~]# docker search google 
+INDEX       NAME                                                     DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+docker.io   docker.io/google/cadvisor                                Analyzes resource usage and performance ch...   238                  
+2-2
+Dockerfile：
+  Docker Images有两种方式生成：	
+     docker commit
+     Dockerfile：文本文件，是镜像文件构建脚本；
+Dockerfile：由一系列根据基础镜像构建新的镜像文件的专用指令序列组成；		
+     指令：选定基础镜像、安装必要的程序、复制配置文件和数据文件、自动运行的服务以及要暴露的端口等；
+     命令：docker build表示启动构建过程；
+     语法：指令行、注释行和空白行；
+           指令行：由指令及指令参数构成；
+                   指令：其字符不区分大小写；约定俗成，要使用全大写字符；
+           注释行：#开头的行，必须单独位于一行当中；
+           空白行：会被忽略；
+指令：
+  FROM指令：必须是第一个非注释行，用于指定所用到的基础镜像；	
+        语法格式：
+        FROM  <image>[:<tag>] 或FROM  <image>@<digest> digest表示消息摘要即校验码，主要是为了镜像安全					
+        例如：
+        FROM  busybox:latest
+        FROM  centos:6.9	
+        注意：尽量不要在一个dockerfile文件中使用多个FROM指令；
+  MAINTANIER指令：用于提供信息的指令，用于让作者提供本人的信息；不限制其出现的位置，但建议紧跟在FROM之后；MAINTANIER表示维护者			
+	语法格式：				
+        MAINTANIER  <author's detail>		
+        例如：
+        MAINTANIER  MageEdu Linux Operation and Maintance Institute <mage@magedu.com>		  
+  COPY指令：用于从docker所在的宿主机复制文件至正在创建的映像文件中；所有新复制生成的目录文件的UID和GID均为0；
+        语法格式：
+            COPY  <src> ...  <dest>        这种格式称为shell格式
+	    COPY  ["<src>",...  "<dest>"]  这种格式称为exec格式，类似函数格式，文件名中有空白字符时使用此种格式
+		  <src>：要复制的源文件或目录，支持使用满足go语法的通配符，因为docker是go语言写的，此外src可以有多个，
+		  <dest>：目标路径，正在创建的镜像文件的文件系统路径；建议使用绝对路径，否则是相对于WORKDIR而言；
+	    例如：
+            COPY  server.xml  /etc/tomcat/server.xml
+	    COPY  *.conf   /etc/httpd/conf.d/
+	    注意：<src>必须是build上下文中的路径，因此，不能使用类似“../some_dir/some_file”类的路径；--非常重要				
+		  <src>如果是目录，递归复制会自动进行；如果有多个<src>，包括在<src>上使用了通配符这种情形，此时<dest>必须是目录，而且必须得以/结尾；
+	          <dest>如果事先不存在，它将被自动创建，包括其父目录；
+ADD指令：类似于COPY指令，额外还支持复制TAR文件，以及URL路径；
+	   语法格式：
+	   ADD  <src> ...  <dest>
+	   ADD  ["<src>",...  "<dest>"]	
+	   示例：
+	   ADD  haproxy.cfg  /etc/haproxy/haproxy.cfg  
+	   ADD  logstash_*.cnf   /etc/logstash/
+	   ADD  http://www.magedu.com/download/nginx/conf/nginx.conf   /etc/nginx/    
+        注意：
+           1）以URL格式指定的源文件，下载完成后其目标文件的权限为600；
+	   2）<src>必须是build上下文中的路径，因此，不能使用类似“../some_dir/some_file”类的路径；
+	   3）如果<src>是URL，且<dest>不以/结尾，则<src>指定的文件将被下载并直接被创建为<dest>；如果<dest>以/结尾，则URL指定的文件将被下载至<dest>中，并保留原名；
+	   4）如果<src>是一个host本地的文件系统上的tar格式的文件，它将被展开为一个目录，其行为类似于tar  -x命令；
+              但是如果通过URL下载到的文件是tar格式的，是不会自动进行展开操作的；
+	   5）<src>如果是目录，递归复制会自动行；如果有多个<src>，包括在<src>上使用了通配符这种情形，此时<dest>必须是目录，而且必须得以/结尾；
+           6）<dest>如果事先不存在，它将被自动创建，包括其父目录；
+总结：尽量使用COPY命令，解压缩功能配合RUN命令来实现，降低使用命令的复杂度
+ENV指令：定义环境变量，这些变量可被当前dockerfile文件中的其它指令所调用，调用格式为$variable_name或${variable_name}；
+	语法：
+	    ENV  <key>  <value>    一次定义一个变量
+	    ENV  <key>=<value> ... 一次可定义多个变量 ，如果<value>中有空白字符，要使用\字符进行转义或加引号
+        例如：
+            ENV  myName="Obama Clark"   myDog=Hello\ Dog  \
+	         myCat=Garfield
+	    等同于：
+		ENV myName  Obama Clark
+		ENV myDog  Hello Dog 
+                ENV myCat  Garfield
+ENV定义的环境变量在镜像运行的整个过程中一直存在，因此，可以使用inspect命令查看，甚至也可以在docker  run启动此镜像时，使用--env选项来修改指定变量的值；
+USER指令：指定运行镜像时，或运行Dockerfile文件中的任何RUN/CMD/ENTRYPOINT指令指定的程序时的用户名或UID；
+	  语法格式：
+		 USER  <UID>|<Username>
+	  注意：<UID>应该使用/etc/passwd文件存在的用户的UID，否则，docker run可能会出错；
+WORKDIR指令：用于为Dockerfile中所有的RUN/CMD/ENTRYPOINT/COPY/ADD指令指定工作目录；
+	语法格式：
+	      WORKDIR  <dirpath>
+	注意：WORDIR可出现多次，也可使用相对路径，此时表示相对于前一个WORKDIR指令指定的路径；WORKDIR还可以调用由ENV定义的环境变量的值；
+	例如：
+	     WORKDIR  /var/log 
+	     WORKDIR  $STATEPATH    STATEPATH是由ENV定义的，此处是引用
+VOLUME指令：用于目标镜像文件中创建一个挂载点目录，用于挂载主机上的卷或其它容器的卷；
+	    语法格式：
+	    VOLUME  <mountpoint>  mountpoint指的是镜像文件中的路径				
+            VOLUME  ["<mountpoint>", ...]  这是一个数组，可以指定多个路径					
+	    注意：如果mountpoint路径下事先有文件存在，docker run命令会在卷挂载完成后将此前的文件复制到新挂载的卷中，相当于两个路径的合并；
+RUN指令：用于指定docker build过程中要运行的命令，而不是docker run此dockerfile构建成的镜像时运行，在一个dockerfile文件里面只能由一个RUN命令，
+         每一个RUN都是启动一个容器、执行命令、然后提交存储层文件变更,
+         每一个RUN命令就相当于创建了一层存储层，如果有多条命令请参照如下方式
+         在撰写 Dockerfile 的时候，要经常提醒自己，这并不是在写 Shell 脚本，而是在定义每一层该如何构建
+	 语法格式：
+		RUN  <command>  次方式会启动一个shell来运行，支持shell通配符，但是不接受信号	
+                RUN  ["<executeable>", "<param1>", "<param2>", ...]  次方式不会启动shell来运行，后面的param1和param2做为executeable的参数，但是不支持shell通配符	
+                RUN  ["/bin/bash", "-c", "<executeable>", "<param1>", "<param2>", ...]
+	 多条命令的执行方式：RUN  yum  install  -y iproute  nginx  && yum clean all
+         多条命令执行后，在命令的最后添加了清理工作的命令，删除了为了编译构建所需要的软件，清理了所有下载、展开的文件，这是很重要的一步，
+         我们之前说过，镜像是多层存储，每一层的东西并不会在下一层被删除，会一直跟随着镜像。因此镜像构建时，一定要确保每一层只添加真正需要添加的东西，
+         任何无关的东西都应该清理掉。
+CMD指令：类似于RUN指令，用于运行程序；但二者运行的时间点不同；CMD在docker run时运行，而非docker build；
+         Docker 不是虚拟机，容器就是进程。既然是进程，那么在启动容器的时候，需要指定所运行的程序及参数。 CMD指令就是用于指定默认的容器主进程的启动命令的
+	 CMD指令的首要目的在于为启动容器指定默认要运行的程序和参数，程序运行结束，容器也就结束；不过，CMD指令指定的程序可被docker run命令行参数中指定要运行的程序所覆盖。
+         语法格式：
+	     CMD  <command>  
+	     CMD  ["<executeable>", "<param1>", "<param2>", ...]  尽量使用该格式
+	     CMD  [ "<param1>", "<param2>", ...]  第三种为ENTRYPOINT指令指定的程序提供默认参数；
+	 注意：如果dockerfile中存在多个CMD指令，仅最后一个生效；
+	     CMD  ["/usr/sbin/httpd", "-c","/etc/httpd/conf/httpd.conf"]   一定要使用双引号，不能使用单引号，实现的效果就是/httpd  -c /etc/httpd/conf/httpd.conf
+切记：
+    Docker 不是虚拟机，容器中的应用程序都应该以前台执行，而不是像虚拟机、物理机里面那样，用upstart/systemd去启动后台服务，容器内没有后台服务的概念
+ENTRYPOINT指令：类似于CMD指令，但其不会被docker run的命令行参数指定的指令所覆盖，而且这些命令行参数会被当作参数送给ENTRYPOINT指令指定的程序；
+	        但是如果运行docker  run时使用了--entrypoint选项，此选项的参数可当作要运行的程序覆盖ENTRYPOINT指令指定的程序；
+	语法格式：
+	     ENTRYPOINT  <command> 或
+	     ENTRYPOINT   ["<executeable>", "<param1>", "<param2>", ...]	
+	例如：
+	     CMD ["-c"]
+	     ENTRYPOINT  ["top", "-b"]    CMD里面的内容被当做参数传递给ENTRYPOINT，以上两条命令等效于 top -b -c 
+EXPOSE指令：用于为容器指定要暴露的端口；
+	语法格式：EXPOSE   <port>[/<protocol>]  [<port>[/<protocol>]] ...    <protocol>为tcp或udp二者之一，默认为tcp；
+	例如： EXPOSE  11211/tcp  11211/udp 
+        EXPOSE指令是声明运行时容器提供服务端口，这只是一个声明，在运行时并不会因为这个声明应用就会开启这个端口的服务。在 Dockerfile 中写入这样的声明有两个好处，
+        一个是帮助镜像使用者理解这个镜像服务的守护端口，以方便配置映射；另一个用处则是在运行时使用随机端口映射时，也就是 docker run -P 时，会自动随机映射 EXPOSE 的端口。
+        要将 EXPOSE 和在运行时使用 -p <宿主端口>:<容器端口> 区分开来。 -p是映射宿主端口和容器端口，换句话说，就是将容器的对应端口服务公开给外界访问，
+        而 EXPOSE 仅仅是声明容器打算使用什么端口而已，并不会自动在宿主进行端口映射。
+ONBUILD指令：定义触发器；当前dockerfile构建出的镜像被用作基础镜像去构建其它镜像时，ONBUILD指令指定的操作才会被执行；
+	语法格式：
+	    ONBUILD  <INSTRUCTION>
+	例如：
+	    ONBUILD  ADD  my.cnf   /etc/mysql/my.cnf
+	注意：ONBUILD不能自我嵌套，且不会触发FROM和MAINTAINER指令；
+Dockerfile构建命令总结：
+    FROM   写在第一行，指明用到的基础镜像
+    MAINTANIER 
+    COPY或者ADD 
+    ENV	 
+    USER	
+    WORKDIR	
+    VOLUME	 
+    RUN                 在docker build时运行
+    CMD或者ENTRYPOINT   在docker run时运行
+    EXPOSE 
+    ONBUILD
+补充命令：
+    docker container prune 可以一次将所有停止的container都删除掉，避免一个一个的删除
+dockfile示例1：
+         mkdir /tmp/busybox  尽量把所有涉及到的文件都放在一个统一的目录里面，比如此处的busybox
+         vim /tmp/busybox/index.html
+              this is from container web	
+         vim  /tmp/busybox/test.dockerfile 			
+             FROM busybox:latest
+             MAINTAINER chenhao
+             COPY index.html  /web/html/index.html 从docker宿主机复制文件到镜像文件			
+             EXPOSE 80/tcp
+             CMD ["httpd","-f","-h","/web/html"]        busybox中自带的httpd和centos通过yum安装的httpd选项不一样
+注意：执行docker run -d把docker运行为后台时，docker内部的应用进程必须启动在前台，这是httpd带-f选项的原因				
+[root@compute1 ~]# docker build -f /tmp/busybox/test.dockerfile   -t busybox:web  /tmp/busybox/    最后的/tmp/busybox/表示工作目录
+Sending build context to Docker daemon 3.072 kB
+Step 1 : FROM busybox:latest
+ ---> d20ae45477cb
+Step 2 : MAINTAINER chenhao
+ ---> Running in 09bc98e2a3c6
+ ---> 6361ead2a7aa
+Removing intermediate container 09bc98e2a3c6
+Step 3 : COPY index.html /web/html/index.html
+ ---> 4cd83bc872d7
+Removing intermediate container 9cd6d0176304
+Step 4 : EXPOSE 80/tcp
+ ---> Running in 57ceb25f2121
+ ---> 65ac7240b7a3
+Removing intermediate container 57ceb25f2121
+Step 5 : CMD httpd -f -h /web/html
+ ---> Running in 13509dcb97d2
+ ---> 838efabf914b
+Removing intermediate container 13509dcb97d2
+Successfully built 838efabf914b
+[root@compute1 ~]# docker images 
+REPOSITORY          TAG                 IMAGE ID            CREATED             SIZE
+busybox             web                 838efabf914b        7 seconds ago       1.129 MB
+[root@compute1 ~]# docker run  -d -P --name web1   busybox:web  因为dockerfile文件里面有EXPOSE命令，所以必须要有-P大写才能暴露出端口
+5707cf5b38d9b72f52cba74e0eb27a7e8e7c5269552e4f6a8f84e97f41145614
+[root@compute1 ~]# docker ps 
+CONTAINER ID        IMAGE               COMMAND                  CREATED             STATUS              PORTS                   NAMES
+5707cf5b38d9        busybox:web         "httpd -f -h /web/htm"   32 seconds ago      Up 8 seconds        0.0.0.0:32768->80/tcp   web1
+[root@compute1 ~]# docker port web1 
+80/tcp -> 0.0.0.0:32768
+[root@compute1 ~]# curl http://192.168.139.181:32768  能成功访问表示配置成功
+this is from container web 		
+练习：
+（1）构建一个基于centos的httpd镜像，要求其主目录路径为/web/htdocs，且主页存在，并以apache用户的身份运行，暴露80端口；
+（2）进一步地，其页面文件为主机上的卷；
+（3）进一步地，httpd支持解析php页面；
+（4）构建一个基于centos的maridb镜像，让容器间可互相通信；
+（5）在httpd上部署wordpress；
+容器导入和导出：
+  docker  export 
+  docker  import 
+镜像的保存及装载：
+  docker  save  -o  /PATH/TO/SOMEFILE.TAR  NAME[:TAG]
+  docker  load  -i  /PATH/FROM/SOMEFILE.TAR 
+2-3		
+回顾：	
+ Dockerfile常用指令：FROM,MAINTAINER,COPY,ADD,WORKDIR,ENV,USER,VOLUME,EXPOSE,RUN,CMD,ENTRYPOINT,ONBUILD
+16分钟		
+Dockerfile(2)	
+示例2：httpd	
+   mkdir /tmp/centos
+   vim /tmp/centos/centos.dockerfile
+   FROM centos:latest		
+   MAINTAINER chenhao		
+   RUN yum -y install httpd php && yum clean all && \ 
+   echo -e '<?php\n\tphpinfo();\n?>' > /var/www/html/index.php  此处的\表示换行	
+   EXPOSE 80/tcp
+   CMD ["/usr/sbin/httpd","-f","/etc/httpd/conf/httpd.conf","-DFOREGROUND"]  镜像中的进程一定要运行为前台 
+   docker build -f /tmp/centos/centos.dockerfile -t centos:web /tmp/centos
+   docker run -d -P --name web centos:web     docker进程一定要运行为后台
+   docker port web
+   访问主页，如果可以正常访问即配置成功
+示例2：通过挂载卷的方式给httpd增加主页
+   echo 'this is from container centos web' >/var/www/html/index.html 
+   mkdir /tmp/centos
+   vim /tmp/centos/centos.dockerfile
+       FROM centos:latest
+       MAINTAINER chenhao		
+       RUN yum -y install httpd php && yum clean all 
+       VOLUME /var/www/html		
+       EXPOSE 80/tcp
+       CMD ["/usr/sbin/httpd","-f","/etc/httpd/conf/httpd.conf","-DFOREGROUND"]   
+   docker build -f /tmp/centos/centos.dockerfile -t centos:web /tmp/centos
+   docker run -d -p 80:80  --name web -v /var/www/html/:/var/www/html  centos:web   
+   docker port web
+   curl http://192.168.139.181   访问host机地址，如果可以正常访问即配置成功
+补充说明：		
+	\n表示换行符
+        \t表示横向跳到下一制表符位置，也就是横向空格					
+	\v表示垂直制表符
+docker 2.1 28分钟
+        	

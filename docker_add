@@ -1,0 +1,143 @@
+﻿docker安装memcached案例：
+[root@www memcached]# docker run -d -p 11211:11211 --name memcached  memcached:1.5		
+[root@www ~]# telnet 192.168.139.135 11211    测试成功
+Trying 192.168.139.135...
+Connected to 192.168.139.135.
+Escape character is '^]'.
+add testkey 0 0 12 
+hello world!
+STORED
+get testkey
+VALUE testkey 0 12
+hello world!
+END
+
+docker安装redis案例
+[root@qbs ~]# redis-cli  -h 10.10.214.10 
+10.10.214.10:6379> set mykey chenhao
+OK
+10.10.214.10:6379> get mykey 
+"chenhao"
+10.10.214.10:6379> quit
+
+docker安装mongodb案例
+[root@qbs ~]# mongo --host 10.10.214.10 
+MongoDB shell version: 2.6.12
+connecting to: 10.10.214.10:27017/test
+Welcome to the MongoDB shell.
+For interactive help, type "help".
+> use chenhao
+switched to db chenhao
+> db.students.insert({name:'jerry',age:20})
+WriteResult({ "nInserted" : 1 })
+> db.students.find()
+{ "_id" : ObjectId("5a2d2713cffa01e4097471f4"), "name" : "jerry", "age" : 20 }
+> quit 
+function quit() { [native code] }
+> quit()			
+
+			
+docker安装kafka，在docker官网搜索wurstmeister，可以获取指定版本的kafka和zookeeper
+1、启动zookeeper
+docker run -d --name zookeeper -p 2181 -t wurstmeister/zookeeper  
+2、启动kafka
+docker run --name kafka -e HOST_IP=localhost -e KAFKA_ADVERTISED_PORT=9092 -e KAFKA_BROKER_ID=1 -e ZK=zk -p 9092 --link zookeeper:zk -t wurstmeister/kafka  
+3、测试发送消息
+docker exec -it ${CONTAINER ID} /bin/bash   进入kafka容器内部 
+cd opt/kafka_2.11-0.10.1.1/   
+bin/kafka-topics.sh --create --zookeeper zookeeper:2181 --replication-factor 1 --partitions 1 --topic mykafka   创建topic
+bin/kafka-console-producer.sh --broker-list localhost:9092 --topic mykafka  运行生成者，输入信息
+bin/kafka-console-consumer.sh --zookeeper zookeeper:2181 --topic mykafka --from-beginning  如果可以获取消息，说明配置成功
+新版本命令为/kafka-console-consumer.sh --bootstrap-server  10.10.214.10:9092 --topic mykafka
+kafka-topics.sh --list  --zookeeper zk:2181 查看有哪些topic
+查找kafka的版本						
+find ./libs/ -name \*kafka_\* | head -1 | grep -o '\kafka[^\n]*'
+from your kafka folder (and it will do the same for you). It will return you something like kafka_2.9.2-0.8.1.1.jar.asc where 0.8.1.1 is your kafka version
+
+外网无法访问kafka原因：
+ 　1)kafka配置文件server.properties中，host.name只绑定在了内部的IP上面，对外的网卡无法访问，也就是物理业务系统服务器上面并不能识别到kafka服务名；
+　   把host.name设置为空的话会kafka监听端口在所有的网卡上绑定。但是在外网访问时，客户端又遇到了“java.nio.channels.ClosedChannelException”异常信息，
+     server端用tcpdump分析的时候发现客户端有传递kafka所在容器的服务名过来。在client里断点跟踪一下发现是findLeader的时候返回的元信息是容器服务名而不是IP。
+     业务系统客户端无法解析这个机器名所以出现了前面的异常。
+　  在server.properties 里还有另一个参数是解决这个问题的， advertised.host.name参数用来配置返回的host.name值，把这个参数配置为局域网IP地址即可。
+   这个参数默认没有启用，默认是返回的java.net.InetAddress.getCanonicalHostName的值。
+　 除了IP之外，还有PORT，外网对应的PORT也需要修改。
+　　针对docker容器可以用环境变量参数将具体的参数传递进去：
+    KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://xxx.xxx.xxx.xxx：port （局域网宿主机的IP地址而非容器的IP，及暴露出来的端口）
+    针对局域网向公网IP端口暴露的话，这修改配置文件,加入以下配置：
+　　advertised.listeners=PLAINTEXT://xxx.xxx.xxx.xxx:port　
+　　2)当Kafka broker启动时，它会在ZK上注册自己的IP和端口号，客户端就通过这个IP和端口号来连接。此时就需要显示指定 advertised.host.name, advertised.listeners参数，
+    让注册到ZK上的IP是外部IP。需要在server.properties 配置文件里增加如下配置（版本0.10.x broker及之后的新版本）：
+　　新版本0.10.x broker配置弃用了advertised.host.name和 advertised.port这两个个配置项，就配置advertised.listeners就可以了。
+补充：docker run -e的案例
+]# docker run -it -e name=chenhao busybox  实际上就相当于执行了export name=chenhao
+/ # echo $name
+chenhao
+
+docker在私有网络下通过代理模式实现拉取互联网上的镜像:
+1）首先在局域网内确保有一台服务器可以访问外网，假设该服务器IP地址是10.10.82.224，在该服务器上安装squid代理软件
+   ~]# yum install -y squid
+   ~]# vi /etc/squid/squid.conf
+      acl localnet src 10.10.0.0/16   # RFC1918 possible internal network
+      acl SSL_ports port 443
+      acl Safe_ports port 80          # http
+      acl CONNECT method CONNECT
+      http_access allow  Safe_ports
+      http_access allow  SSL_ports
+      http_access allow localnet   把这如上4条配置写在一起，且写在最前面
+      http_port 3128  transparent  加上transparent表示是透明代理
+      http_access allow  CONNECT
+      cache_dir ufs /var/spool/squid 100 16 256  
+      cache_access_log /var/log/squid/access.log
+      cache_log /var/log/squid/cache.log
+      cache_store_log /var/log/squid/store.log
+      logfile_rotate 7   保留6份历史日志和1份当前日志
+      其余配置不做改动
+说明：
+   1）因为目前只计划代理docker服务，所以只开放443端口，后续需要代理其他服务时，可以打开其他端口
+   2）目前只开放了CONNECT方法，该方法同get很类似。如果需要开放put和post，需增加如下两行配置
+      acl Uploads method PUT POST
+      http_access allow  Uploads
+   ~]# squid  -z  创建交换日志 
+   ~]# service squid start
+   ~]# ss -tunl 查看3128端口是否监听
+   ~]# ll /var/log/squid/
+total 682280
+-rw-r----- 1 squid squid 698631370 Dec 21 14:13 access.log
+-rw-r----- 1 squid squid     14074 Dec 21 14:20 cache.log
+-rw-r--r-- 1 root  root          0 Dec 20 17:38 squid.out
+-rw-r----- 1 squid squid         0 Dec 21 14:20 store.log
+   ~]# squid -k  rotate   做日志切割
+   ~]# ll /var/log/squid/ 查看日志切割效果
+total 682284
+-rw-r----- 1 squid squid         0 Dec 21 14:20 access.log
+-rw-r----- 1 squid squid 698631370 Dec 21 14:13 access.log.0
+-rw-r----- 1 squid squid       294 Dec 21 14:20 cache.log
+-rw-r----- 1 squid squid     14074 Dec 21 14:20 cache.log.0
+-rw-r--r-- 1 root  root          0 Dec 20 17:38 squid.out
+-rw-r----- 1 squid squid         0 Dec 21 14:20 store.log
+-rw-r----- 1 squid squid         0 Dec 21 14:20 store.log.0
+   ~]# crontab -e
+      0 3 * * * /usr/sbin/squid -k rotate  每天凌晨3点自动做日志切割
+   ~]# iptables -t nat -A  PREROUTING -i eth0 -s 10.10.0.0/16  -p tcp -m multiport  --dports 80,443  -j REDIRECT --to-port 3128 经过测试这条命令可以不加
+2) 在需要安装docker的服务器上正常安装好docker-ce，由于docker现在工作在代理模式下，所以需要增加如下两个配置文件
+   ~]# mkdir -p /etc/systemd/system/docker.service.d
+   ~]# vi /etc/systemd/system/docker.service.d/https-proxy.conf
+       [Service]
+       Environment="HTTPS_PROXY=https://10.10.82.224:3128/"  填写代理服务器的IP地址和端口
+   ~]# vi /etc/systemd/system/docker.service.d/http-proxy.conf
+       [Service]
+       Environment="HTTP_PROXY=http://10.10.82.224:3128/"
+   ~]# systemctl daemon-reload  表示Reload systemd manager configuration 
+   ~]# systemctl restart docker.service 
+   ~]# systemctl show --property=Environment docker  确保变量已经生成
+Environment=HTTP_PROXY=http://10.10.82.224:3128/ HTTPS_PROXY=https://10.10.82.224:3128/
+   ~]# ip route add default via 10.10.82.224 dev eth0   把docker所在服务器的默认网关指向代理服务所在的IP地址，经过测试这条命令可以不加
+   如果如下两条测试命令测试成功，说明docker代理配置正常。如果这里测试失败，一般都是squid代理服务器配置有问题
+   ~]# docker search centos  
+   ~]# docker pull centos 
+
+docker 安装kingshard
+https://github.com/flike/kingshard/blob/master/doc/KingDoc/kingshard_install_document.md
+https://segmentfault.com/a/1190000003709021
+https://segmentfault.com/a/1190000003001545

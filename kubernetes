@@ -1,0 +1,414 @@
+容器调度工具介绍:
+   1)docker官方：machine，swarm，compose
+   2)ASF旗下也有一套docker的调度器：mesos是一个资源调度器，但是更加底层，openstack也可以运行在mesos上；但是真正实现docker调度是marathon
+   3)google：kubernetes是一个docker调度器，有CLI,UI,API三种方式可以和kubernetes-master进行通信，实际使用中需要配置一个使用registry，node节点从私有registry中拉取镜像
+
+kubernetes
+3.1
+kubernetes官网https://kubernetes.io/
+master节点主要程序有kubernetes-master(API server,scheduler server,controller server)以及独立的etcd
+      1)API server接受命令行kubectl的请求，其监听在8080端口
+      2)scheduler server控制pod运行在哪一个node上面
+      3)controller server控制pod的副本数等
+      4)etcd是独立服务，存储集群状态
+node节点主要程序有kubernetes-node(kubelet,kube-proxy)和flannel,docker
+      1)kubelet,接受master节点发来的指令，其监听在10250端口
+      2)pod可以理解为容器的容器，也即容器组，同一个pod内的容器必须运行在同一个node上；在k8s中容器没有端口和ip地址，端口和ip地址属于pod，但是每次pod销毁重启后ip地址都不一样
+        同一个pod内的container共用相同的ip，port等
+      3)pod与pod通信可以通过kubernete的插件DNS功能实现，因为pod的地址会改变，但是如果hostname不变，DNS有自动发现功能
+      4)kube-proxy的主要作用就是负责service的实现，同时监控service后端的pod变化，帮助service生成nat规则，接受来自客户端的请求。只能反向代理tcp和udp，不接受http
+        kube-proxy目前有userspace和iptables两种实现方式，一般使用iptables方式
+      5)service是一个抽象概念，其ip是固定的，但是虚拟的，此ip可以人工指定或者kubernetes集群分配，service的主要目的就是让kubernetes集群内的其他pod或者docker可以访问该service固定的ip
+        来访问到后端pod的内容，但是kubernete集群外的主机任然无法访问该service的ip地址。
+        service靠label selector来识别后端的pod，所以后端pod必须要有labels，labels实际就是kv键值对
+      6)一个pod内可以有多个container，但是至少要有一个container，一个service后端有多个pod
+      7)labels主要是为了便于引用一个或一组pod
+      8)flannel用于解决不同主机之间的docker通信问题
+      9)docker是用来运行docker实例
+安装顺序docker--etcd--flannel--kubernets-master--kubernetes-node
+必须要先安装好docker和etcd，而且顺利启动后才能安装flanne，否则会出错，所有节点都必须安装flannel
+务必关闭iptables，firewall，selinux。但是一旦docker启动后，清空iptables要慎重
+
+3-3
+先把docker+etcd+flannel环境构建好，因为这3个环境是独立于kubernetes的
+flannel最好在kubernetes前面安装，如果flannel安装在kubernetes后面，需要重启前面所有的kubernetes和docker服务，因为flanne会改变docker0的网段地址
+https://xuxinkun.github.io/2016/07/18/flannel-docker/  flannel的原理可以参照这篇文章
+准备工作：docker和etcd要先安装好，而且要启动
+在192.168.1.128安装etcd，确保extras源是正常的
+]# vi /etc/hosts
+192.168.139.128 master etcd
+192.168.139.184 node1
+192.168.139.138 node2
+]# yum install -y etcd
+]# rpm -ql etcd
+]# vi /etc/etcd/etcd.conf
+   [Member]
+   ETCD_DATA_DIR="/var/lib/etcd/default.etcd"
+   ETCD_LISTEN_CLIENT_URLS="http://0.0.0.0:2379,http://0.0.0.0:4001" 表示监听的端口，一般2379是客户端访问端口，4001是集群通信端口
+   [Clustering]
+   ETCD_ADVERTISE_CLIENT_URLS="http://etcd:2379,http://etcd:4001"  向主节点http://etcd:2379,http://etcd:4001通告自己
+]# systemctl start etcd.service 
+]# etcdctl --help 
+]# etcdctl cluster-health
+member 8e9e05c52164694d is healthy: got healthy result from http://etcd:2379
+cluster is healthy
+]# etcdctl setdir testdir  创建一个目录，etcd有点可以像目录那样管理
+]# etcdctl set  testdir/testkey 'hello' 
+hello
+]# etcdctl get testdir/testkey 
+hello
+]# etcdctl ls testdir
+/testdir/testkey
+在所有节点安装flannel
+]# yum install -y flannel 
+]# rpm -ql flannel 
+]# vi /etc/sysconfig/flanneld
+FLANNEL_ETCD_ENDPOINTS="http://etcd:2379"  指明etcd地址和端口
+FLANNEL_ETCD_PREFIX="/atomic.io/network"   
+]# etcdctl  mkdir  /atomic.io/network  这个路径一定要和上面配置文件中的一样
+]# etcdctl  set   /atomic.io/network/config   '{"Network": "10.1.0.0/16"}'
+]# systemctl start   flanneld.service     如果docker和kubernetes集群已经启动，则所有的docker和kubernetes集群都需要重启
+]# route -n      如何确保不同主机的docker可以互相通信，flannel的核心就是添加了路由规则，同时修改docker0的网段为flannel的子网段
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+0.0.0.0         192.168.139.2   0.0.0.0         UG    100    0        0 eno16777736
+10.1.0.0        0.0.0.0         255.255.0.0     U     0      0        0 flannel0  目标地址是10.1.0.0全部通过flannel转发
+10.1.51.0       0.0.0.0         255.255.255.0   U     0      0        0 docker0   目标地址是10.1.51.0全部通过docker0转发
+192.168.122.0   0.0.0.0         255.255.255.0   U     0      0        0 virbr0
+192.168.139.0   0.0.0.0         255.255.255.0   U     100    0        0 eno16777736
+]# ifconfig
+docker0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1472
+        inet 10.1.51.1  netmask 255.255.255.0  broadcast 0.0.0.0     docker0对应的是flannel的一个子网
+flannel0: flags=4305<UP,POINTOPOINT,RUNNING,NOARP,MULTICAST>  mtu 1472
+        inet 10.1.51.0  netmask 255.255.0.0  destination 10.1.3.0   flannel地址是在之前设置的10.1.0.0/16网段内
+补充解释：
+     1)A主机运行一个busybox1实例，B主机运行两个busybox2/3实例
+       busybox1和busybox2/3通信过程是busybox1--docker0(A)--flannel0(A)--A主机物理网卡--B主机物理网卡--flannel0(B)--docker0(B)--busybox2/3
+       busybox2/3通信过程是busybox2--docker0(B)--busybox3
+       所以可以使用tcpdump -i flannel0|docker0(A)|主机物理网卡来查看对应报文，但是在主机物理网卡上查看到的是ipip报文，-i表示interface
+     2)要想实现不同主机之间的docker实例可以通信，除了vxlan和gre外，使用flannel+etcd也可以独立实现
+
+3-2
+kubernetes安装
+架构：
+192.168.139.128扮演etcd和kubernetes-master
+192.168.139.138|184扮演kubernetes-node
+主机：centos7.2
+http://www.cnblogs.com/zhenyuyaodidiao/p/6500830.html  kubernetes安装参照这篇文档
+在192.168.1.128安装kubernetes-master，确保extras源是正常的
+]# yum install -y  kubernetes  会主动安装上kubernetes-master
+]# rpm -ql kubernetes-master 
+]# cd /etc/kubernetes
+]# ll
+total 24
+-rw-r--r-- 1 root root 743 Jan 21 19:23 apiserver
+-rw-r--r-- 1 root root 652 Jan 21 19:22 config  主配置文件
+-rw-r--r-- 1 root root 189 Jul  3  2017 controller-manager
+-rw-r--r-- 1 root root 111 Jul  3  2017 scheduler
+]# vi apiserver
+KUBE_API_ADDRESS="--insecure-bind-address=0.0.0.0"
+KUBE_API_PORT="--port=8080"   是api的监听端口，kubectl就是通过这个接口与kubernetes进行交互的
+KUBE_ETCD_SERVERS="--etcd-servers=http://etcd:2379"  指明etcd地址端口
+KUBE_ADMISSION_CONTROL="--admission-control=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ResourceQuota"  原先有ServiceAccount，务必需要删除掉
+]# vi config
+KUBE_MASTER="--master=http://master:8080"  指明master地址端口
+]# systemctl start kube-apiserver.service
+]# systemctl start kube-controller-manager.service
+]# systemctl start kube-scheduler.service
+]# ss -tunl 查看8080端口是否开启
+
+在192.168.139.128|184安装kubernetes-node
+两个节点都要做如下操作
+]# vi /etc/hosts
+192.168.139.128 master etcd
+192.168.139.184 node1
+192.168.139.138 node2
+]# yum install -y docker
+]# yum install -y *rhsm*  实际就是安装python-rhsm和python-rhsm-certificates，必须安装否则后续会报错
+]# systemctl start docker.service 
+]# docker pull pull registry.access.redhat.com/rhel7/pod-infrastructure  必须要有该镜像，否则后续docker部署不成功,该镜像已经save为infrastructure.tar 
+]# yum install -y kubernetes-node
+]# rpm -ql kubernetes-node
+]# cd /etc/kubernetes
+]# vi kubelet
+KUBELET_ADDRESS="--address=0.0.0.0"
+KUBELET_PORT="--port=10250"
+KUBELET_HOSTNAME="--hostname-override=node2"
+KUBELET_API_SERVER="--api-servers=http://master:8080"
+]# vi config 
+KUBE_MASTER="--master=http://master:8080"
+]# systemctl start docker.service
+]# systemctl start kubelet.service  最好再查看下状态
+]# systemctl start kube-proxy.service 
+]# ss -tunl 查看10250端口
+在192.168.1.128这个master节点上查看集群状态
+]# kubectl -s http://master:8080 get node   直接输入kubectl获取子命令
+NAME      STATUS    AGE
+node1     Ready     2m
+node2     Ready     3m
+kubernetes的对象可以通过kubectl来实现增删查改
+spec表示对象期望的状态，status表示对象的实际状态
+kubectl的对象通过yaml格式的文件来创建
+
+如上只是把kubernetes集群安装好了，下面开始真正的容器部署操作
+1)简单的部署
+]# vi /root/deployment-example.yaml   格式和空格一定要对
+apiVersion: extensions/v1beta1
+kind: Deployment  kind表示对象的类型
+metadata:
+  name: deployment-example  对象名称，一般和文件名相同
+spec:   spec表示部署对象的期望状态
+  replicas: 3  副本数就是实际的pod数量
+  template:    pod的模板，指明pod有哪些属性
+    metadata:  pod的元数据
+      labels:  pod的labels，一般要有
+        app: httpd 
+    spec:  这个位置的spec表示每一个pod的期望状态
+      containers:  对象中至少要有一个container
+      - name: httpd   container名称，用于DNS-LABEL
+        image: busybox:httpd   container用到的镜像
+]# kubectl create -f ./deployment-example.yaml  --dry-run  --validate=true  测试语法之类是否有问题
+]# kubectl create -f ./deployment-example.yaml  正式部署
+]# kubectl get deploy  -s http://master:8080  一定要确保所有状态都是正常的
+NAME                 DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+deployment-example   3         3         3            3           51m
+]# kubectl get pod --all-namespaces -s http://master:8080 -o wide   查看pod状态
+NAMESPACE   NAME                                    READY     STATUS    RESTARTS   AGE       IP                NODE
+default     deployment-example-1297718722-8hlr1     1/1       Running   1          2h        10.1.34.2         node2
+default     deployment-example-1297718722-lhddm     1/1       Running   1          2h        10.1.34.3         node2
+default     deployment-example-1297718722-mc2v9     1/1       Running   1          2h        10.1.42.3         node1
+确保在集群的任何主机和任何主机的docker内都可以访问到curl http://10.1.34.2,curl http://10.1.34.3,curl http://10.1.42.3 ,否则需要检查网络
+]# kubectl describe  pod deployment-example-1297718722-8hlr1   -s http://master:8080   假设这个pod有异常，可以通过该命令查看日志信息，对调错很有帮助
+
+2)为上面部署的name为deployment-example的pod部署一个service
+]# vi  service-example.yaml
+apiVersion: v1
+kind: Service   类型为service
+metadata: 
+  name: service-example
+spec:
+  ports:
+   - name: http
+     port: 80
+     targetPort: 80  后端pod监听端口
+  selector: 
+    app: httpd  引用后端pod的名称，要和上面pod的labels一样
+  type: LoadBalancer    除了LoadBalancer，还可以填写NodePort，效果基本一样
+]# kubectl create -f ./service-example.yaml -s http://master:8080
+]# kubectl get services -s http://master:8080 
+NAME                      CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+kubernetes                10.254.0.1      <none>        443/TCP        3d
+service-example           10.254.104.78   <pending>     80:32594/TCP   3h
+现在有两种方式可以查看
+方式一：
+在集群任何主机上起一个docker，curl http://10.254.104.78都可以访问到后端pod的内容，如果访问不到，需要检查网络
+方式二：
+在任意客户端主机，前提是客户端要能ping通node节点，而且后端pod确实运行在该node节点上，则curl http://nodeip:32594都可以访问到后端pod的内容，如果访问不到，需要检查网络
+实际上这个时候是iptables规则起了作用，通过iptables -S -t nat可以查看到与32594端口有关的规则
+
+说明:
+   部署到这里,通过pod+service方式,已经可以让客户端访问到docker内的内容了,但是现在面临两个问题
+   1)如果新增加pod,然后增加service,则需要把新服务的node地址和曝露的port告诉给客户端,很混乱
+   2)主机的port有限,不能增加一个服务,就曝露一个端口
+解决方案:使用ingress,也就是在集群内起一个nginx的pod,通过在nginx上配置host+url方式访问到后端的pod
+         因为nginx是运行在kubernetes集群内,所以它可以访问集群内的任何pod,此时对外只需要nginx的pod所在node的ip,port即可
+
+ingress介绍:
+    ingress,是一个yaml文件,针对每一个新增加的service,都有这样一个文件
+    ingress-controller,可以理解为安装ingress-controller时就会安装nginx,ingress-controller同时根据ingress文件来动态创建nginx配置,并reload nginx使配置生效
+ingress的安装:
+1)先安装默认的pod和service,也就是当访问的url不存在时,返回客户端一个404
+]# docker pull index.tenxcloud.com/jimmy/defaultbackend:1.3  所有node节点都要这个镜像，已经save为defaultbackend.tar
+]# vi default-backend.yaml 
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: default-http-backend
+  labels:
+    app: default-http-backend
+  #namespace: ingress-nginx   把这行注释掉，有这行会报错
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: default-http-backend
+  template:
+    metadata:
+      labels:
+        app: default-http-backend
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: default-http-backend
+        # Any image is permissible as long as:
+        # 1. It serves a 404 page at /
+        # 2. It serves 200 on a /healthz endpoint
+        image: index.tenxcloud.com/jimmy/defaultbackend:1.3   要用到这个镜像
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 5
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: 10m
+            memory: 20Mi
+          requests:
+            cpu: 10m
+            memory: 20Mi
+]# kubectl create -f ./default-backend.yaml  -s http://master:8080 
+]# kubectl delete  -f ./default-backend.yaml  -s http://master:8080  如果需要删除则做这个操作
+]# kubectl get pod --all-namespaces -s http://master:8080  -o wide
+NAMESPACE   NAME                                    READY     STATUS    RESTARTS   AGE       IP                NODE
+default     default-http-backend-1848400116-4phr3   1/1       Running   2          4h        10.1.42.2         node1  确保这个pod是运行的
+default     deployment-example-1297718722-8hlr1     1/1       Running   2          3h        10.1.34.2         node2
+default     deployment-example-1297718722-lhddm     1/1       Running   2          3h        10.1.34.3         node2
+default     deployment-example-1297718722-mc2v9     1/1       Running   2          3h        10.1.42.3         node1
+]# curl http://10.1.42.2:8080/healthz  在集群的任意node节点进行访问,出现ok说明部署成功,访问不了就检测网络
+ok
+2)给default-backend部署一个service
+ 因为ingress-controller要依赖到service-default-backend,所以要先部署service-default-backend
+]# vi  default-http-backend.yaml 
+apiVersion: v1
+kind: Service
+metadata: 
+  name: default-http-backend
+spec:
+  ports:
+   - name: backend
+     port: 80
+     targetPort: 8080
+  selector: 
+    app:  default-http-backend
+  type: LoadBalancer 
+]# kubectl create -f ./service-default-backend.yaml  -s http://master:8080
+]# kubectl get services -s http://master:8080 
+NAME                      CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+kubernetes                10.254.0.1      <none>        443/TCP        3d
+default-http-backend      10.254.10.133   <pending>     80:30744/TCP   3h
+service-example           10.254.104.78   <pending>     80:32594/TCP   3h
+]# kubectl describe service service-default-backend  此命令可以查看service的详细信息
+验证访问同之前service的验证方法一样
+3)部署ingress-controller
+]# docker pull index.tenxcloud.com/jimmy/nginx-ingress-controller:0.9.0-beta.15  每个node节点都要有这个镜像，已经save为/nginx-ingress-controller.tar 
+]# vi nginx-ingress-controller.yaml
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: nginx-ingress-lb
+  labels:
+    name: nginx-ingress-lb
+  namespace: default 
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: nginx-ingress-lb
+      annotations:
+        prometheus.io/port: '10254'
+        prometheus.io/scrape: 'true'
+    spec:
+      terminationGracePeriodSeconds: 60
+      hostNetwork: true
+      containers:
+      - image: index.tenxcloud.com/jimmy/nginx-ingress-controller:0.9.0-beta.15 
+        name: nginx-ingress-lb
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 10254
+            scheme: HTTP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 10254
+            scheme: HTTP
+          initialDelaySeconds: 10
+          timeoutSeconds: 1
+        ports:
+        - containerPort: 80
+          hostPort: 80
+        - containerPort: 443
+          hostPort: 443
+        env:
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: KUBERNETES_MASTER
+            value: http://192.168.139.128:8080
+        args:
+        - /nginx-ingress-controller
+        - --default-backend-service=$(POD_NAMESPACE)/service-default-backend  
+        - --apiserver-host=http://192.168.139.128:8080
+]# kubectl create -f ./nginx-ingress-controller.yaml  -s http://master:8080 
+]# kubectl get pod --all-namespaces -s http://master:8080  -o wide
+NAMESPACE   NAME                                    READY     STATUS    RESTARTS   AGE       IP                NODE
+default     default-http-backend-1848400116-4phr3   1/1       Running   2          4h        10.1.42.2         node1
+default     deployment-example-1297718722-8hlr1     1/1       Running   2          4h        10.1.34.2         node2
+default     deployment-example-1297718722-lhddm     1/1       Running   2          4h        10.1.34.3         node2
+default     deployment-example-1297718722-mc2v9     1/1       Running   2          4h        10.1.42.3         node1
+default     nginx-ingress-lb-x6l04                  1/1       Running   1          3h        192.168.139.184   node1  确保此pod是运行的,而且注意此pod的ip地址是node1的ip地址
+在192.168.139.184节点查看nginx进程是否启动
+]# netstat -tunlp|grep nginx   主要是看80和443端口
+tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      24420/nginx: worker 
+tcp        0      0 0.0.0.0:443             0.0.0.0:*               LISTEN      24420/nginx: worker 
+tcp        0      0 0.0.0.0:18080           0.0.0.0:*               LISTEN      24420/nginx: worker  
+tcp6       0      0 :::80                   :::*                    LISTEN      24420/nginx: worker 
+tcp6       0      0 :::443                  :::*                    LISTEN      24420/nginx: worker 
+tcp6       0      0 :::18080                :::*                    LISTEN      24420/nginx: worker
+]# curl http://192.168.139.184:10254/healthz  出现ok说明ingress-controller部署成功
+ok 
+4)为之前service-example这个service创建一个ingress的yaml文件
+]# vi  test-ingress.yaml 
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: test-ingress
+  annotations:    如果下面要配置path，则必须要有annotations配置
+    ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: test.web
+    http:
+      paths:
+      - path: /www
+        backend:
+          serviceName: service-example
+          servicePort: 80
+]# kubectl  get ing
+NAME          HOSTS      ADDRESS           PORTS     AGE
+new-ingress   test.web   192.168.139.184   80        8m
+现在只要可以实现test.web解析到192.168.139.184，就能够成功的访问，本次就在192.168.139.184上做解析
+]# vi /etc/hosts
+   192.168.139.128 master etcd
+   192.168.139.184 node1  test.web 
+   192.168.139.138 node2
+]# curl http://test.web/www
+hello world
+]# curl http://test.web/dfdsj  访问不存在的路径时就出现404 
+<html>
+<head><title>502 Bad Gateway</title></head>
+<body bgcolor="white">
+<center><h1>502 Bad Gateway</h1></center>
+<hr><center>nginx/1.13.5</center>
+</body>
+</html>
+
+遗漏问题：
+   ssl的实现
+   差真正的nginx作用还比较远
+
+
+
+
+
