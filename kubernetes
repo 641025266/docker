@@ -2,17 +2,24 @@
    1)docker官方：machine，swarm，compose
    2)ASF旗下也有一套docker的调度器：mesos是一个资源调度器，但是更加底层，openstack也可以运行在mesos上；但是真正实现docker调度是marathon
    3)google：kubernetes是一个docker调度器，有CLI,UI,API三种方式可以和kubernetes-master进行通信，实际使用中需要配置一个使用registry，node节点从私有registry中拉取镜像
+补充说明：
+kubeadm是Kubernetes官方推出的快速部署Kubernetes集群工具，其思路是将Kubernetes相关服务容器化(Kubernetes静态Pod)以简化部署。
+kubeadm当前处于beta阶段，不建议生产环境使用（比如etcd单点）
 
 kubernetes
 3.1
 kubernetes官网https://kubernetes.io/
 master节点主要程序有kubernetes-master(API server,scheduler server,controller server)以及独立的etcd
       1)API server接受命令行kubectl的请求，其监听在8080端口
-      2)scheduler server控制pod运行在哪一个node上面
+      2)scheduler负责资源的调度，按照预定的调度策略将Pod调度到相应的机器上。调度流程主要如下
+        过滤主机：调度器用一组规则过滤掉不符合要求的主机。比如Pod指定了所需要的资源量，那么可用资源比Pod需要的资源量少的主机会被过滤掉。
+        主机打分：对第一步筛选出的符合要求的主机进行打分，在主机打分阶段，调度器会考虑一些整体优化策略，比如把容一个Replication Controller的副本分布到不同的主机上，
+                  使用最低负载的主机等。
+        选择主机：选择打分最高的主机，进行binding操作，结果存储到etcd中。
       3)controller server控制pod的副本数等
       4)etcd是独立服务，存储集群状态
 node节点主要程序有kubernetes-node(kubelet,kube-proxy)和flannel,docker
-      1)kubelet,接受master节点发来的指令，其监听在10250端口
+      1)kubelet接受master节点发来的指令，其监听在10250端口
       2)pod可以理解为容器的容器，也即容器组，同一个pod内的容器必须运行在同一个node上；在k8s中容器没有端口和ip地址，端口和ip地址属于pod，但是每次pod销毁重启后ip地址都不一样
         同一个pod内的container共用相同的ip，port等
       3)pod与pod通信可以通过kubernete的插件DNS功能实现，因为pod的地址会改变，但是如果hostname不变，DNS有自动发现功能
@@ -25,12 +32,12 @@ node节点主要程序有kubernetes-node(kubelet,kube-proxy)和flannel,docker
       7)labels主要是为了便于引用一个或一组pod
       8)flannel用于解决不同主机之间的docker通信问题
       9)docker是用来运行docker实例
-安装顺序docker--etcd--flannel--kubernets-master--kubernetes-node
-必须要先安装好docker和etcd，而且顺利启动后才能安装flanne，否则会出错，所有节点都必须安装flannel
+安装顺序etcd--flannel--docker--kubernets-master--kubernetes-node
+否则会出错，所有节点都必须安装flannel
 务必关闭iptables，firewall，selinux。但是一旦docker启动后，清空iptables要慎重
 
 3-3
-先把docker+etcd+flannel环境构建好，因为这3个环境是独立于kubernetes的
+依次序安装etcd-flannel-docker-kubernetes
 flannel最好在kubernetes前面安装，如果flannel安装在kubernetes后面，需要重启前面所有的kubernetes和docker服务，因为flanne会改变docker0的网段地址
 https://xuxinkun.github.io/2016/07/18/flannel-docker/  flannel的原理可以参照这篇文章
 准备工作：docker和etcd要先安装好，而且要启动
@@ -49,9 +56,13 @@ https://xuxinkun.github.io/2016/07/18/flannel-docker/  flannel的原理可以参
    ETCD_ADVERTISE_CLIENT_URLS="http://etcd:2379,http://etcd:4001"  向主节点http://etcd:2379,http://etcd:4001通告自己
 ]# systemctl start etcd.service 
 ]# etcdctl --help 
-]# etcdctl cluster-health
+]# etcdctl cluster-health  如下检测手段都可以
 member 8e9e05c52164694d is healthy: got healthy result from http://etcd:2379
 cluster is healthy
+]# etcdctl endpoint health
+127.0.0.1:2379 is healthy: successfully committed proposal: took = 1.176266ms
+]# etcdctl member list
+8e9e05c52164694d, started, default, http://localhost:2380, http://etcd:2379,http://etcd:4001
 ]# etcdctl setdir testdir  创建一个目录，etcd有点可以像目录那样管理
 ]# etcdctl set  testdir/testkey 'hello' 
 hello
@@ -126,7 +137,7 @@ KUBE_MASTER="--master=http://master:8080"  指明master地址端口
 ]# yum install -y docker
 ]# yum install -y *rhsm*  实际就是安装python-rhsm和python-rhsm-certificates，必须安装否则后续会报错
 ]# systemctl start docker.service 
-]# docker pull pull registry.access.redhat.com/rhel7/pod-infrastructure  必须要有该镜像，否则后续docker部署不成功,该镜像已经save为infrastructure.tar 
+]# docker pull registry.access.redhat.com/rhel7/pod-infrastructure  必须要有该镜像，否则后续docker部署不成功,该镜像已经save为infrastructure.tar 
 ]# yum install -y kubernetes-node
 ]# rpm -ql kubernetes-node
 ]# cd /etc/kubernetes
@@ -150,7 +161,7 @@ kubernetes的对象可以通过kubectl来实现增删查改
 spec表示对象期望的状态，status表示对象的实际状态
 kubectl的对象通过yaml格式的文件来创建
 
-如上只是把kubernetes集群安装好了，下面开始真正的容器部署操作
+如上只是把kubernetes集群安装好了，下面开始真正的容器部署操作,部署都集中在master节点进行
 1)简单的部署
 ]# vi /root/deployment-example.yaml   格式和空格一定要对
 apiVersion: extensions/v1beta1
@@ -166,7 +177,7 @@ spec:   spec表示部署对象的期望状态
     spec:  这个位置的spec表示每一个pod的期望状态
       containers:  对象中至少要有一个container
       - name: httpd   container名称，用于DNS-LABEL
-        image: busybox:httpd   container用到的镜像
+        image: busybox:httpd   container用到的镜像,用dockerfile来写
 ]# kubectl create -f ./deployment-example.yaml  --dry-run  --validate=true  测试语法之类是否有问题
 ]# kubectl create -f ./deployment-example.yaml  正式部署
 ]# kubectl get deploy  -s http://master:8080  一定要确保所有状态都是正常的
@@ -204,7 +215,7 @@ service-example           10.254.104.78   <pending>     80:32594/TCP   3h
 在集群任何主机上起一个docker，curl http://10.254.104.78都可以访问到后端pod的内容，如果访问不到，需要检查网络
 方式二：
 在任意客户端主机，前提是客户端要能ping通node节点，而且后端pod确实运行在该node节点上，则curl http://nodeip:32594都可以访问到后端pod的内容，如果访问不到，需要检查网络
-实际上这个时候是iptables规则起了作用，通过iptables -S -t nat可以查看到与32594端口有关的规则
+实际上这个时候是iptables规则起了作用，通过iptables -S -t nat可以查看到与32594端口有关的规则,32594就是10.254.104.78的80端口映射
 
 说明:
    部署到这里,通过pod+service方式,已经可以让客户端访问到docker内的内容了,但是现在面临两个问题
@@ -214,7 +225,7 @@ service-example           10.254.104.78   <pending>     80:32594/TCP   3h
          因为nginx是运行在kubernetes集群内,所以它可以访问集群内的任何pod,此时对外只需要nginx的pod所在node的ip,port即可
 
 ingress介绍:
-    ingress,是一个yaml文件,针对每一个新增加的service,都有这样一个文件
+    ingress是一个yaml文件,针对每一个新增加的service,都有这样一个文件
     ingress-controller,可以理解为安装ingress-controller时就会安装nginx,ingress-controller同时根据ingress文件来动态创建nginx配置,并reload nginx使配置生效
 ingress的安装:
 1)先安装默认的pod和service,也就是当访问的url不存在时,返回客户端一个404
@@ -285,13 +296,13 @@ spec:
   selector: 
     app:  default-http-backend
   type: LoadBalancer 
-]# kubectl create -f ./service-default-backend.yaml  -s http://master:8080
+]# kubectl create -f ./default-http-backend.yaml  -s http://master:8080
 ]# kubectl get services -s http://master:8080 
 NAME                      CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
 kubernetes                10.254.0.1      <none>        443/TCP        3d
 default-http-backend      10.254.10.133   <pending>     80:30744/TCP   3h
 service-example           10.254.104.78   <pending>     80:32594/TCP   3h
-]# kubectl describe service service-default-backend  此命令可以查看service的详细信息
+]# kubectl describe service default-http-backend  此命令可以查看service的详细信息
 验证访问同之前service的验证方法一样
 3)部署ingress-controller
 ]# docker pull index.tenxcloud.com/jimmy/nginx-ingress-controller:0.9.0-beta.15  每个node节点都要有这个镜像，已经save为/nginx-ingress-controller.tar 
@@ -348,7 +359,7 @@ spec:
             value: http://192.168.139.128:8080
         args:
         - /nginx-ingress-controller
-        - --default-backend-service=$(POD_NAMESPACE)/service-default-backend  
+        - --default-backend-service=$(POD_NAMESPACE)/default-http-backend 
         - --apiserver-host=http://192.168.139.128:8080
 ]# kubectl create -f ./nginx-ingress-controller.yaml  -s http://master:8080 
 ]# kubectl get pod --all-namespaces -s http://master:8080  -o wide
@@ -385,7 +396,8 @@ spec:
         backend:
           serviceName: service-example
           servicePort: 80
-]# kubectl  get ing
+]# kubectl create  -f ./test-ingress.yaml   -s http://master:8080
+]# kubectl  get ing  部署完成后可能需要等一会才会出现ADDRESS
 NAME          HOSTS      ADDRESS           PORTS     AGE
 new-ingress   test.web   192.168.139.184   80        8m
 现在只要可以实现test.web解析到192.168.139.184，就能够成功的访问，本次就在192.168.139.184上做解析
@@ -404,10 +416,176 @@ hello world
 </body>
 </html>
 
-遗漏问题：
-   ssl的实现
-   差真正的nginx作用还比较远
+在前面的基础上安装k8s的dashboard，也就是图形管理界面
+]# vi kubernetes-dashboard.yaml
+kind: Deployment
+apiVersion: extensions/v1beta1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kube-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-dashboard
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-dashboard
+      annotations:
+        scheduler.alpha.kubernetes.io/tolerations: |
+          [
+            {
+              "key": "dedicated",
+              "operator": "Equal",
+              "value": "master",
+              "effect": "NoSchedule"
+            }
+          ]
+    spec:
+      containers:
+      - name: kubernetes-dashboard
+        image: docker.io/ist0ne/kubernetes-dashboard-amd64:latest    #镜像已经打包为kubernetes-dashboard-amd64.tar
+        ports:
+        - containerPort: 9090
+          protocol: TCP
+        args:
+          # Uncomment the following line to manually specify Kubernetes API server Host
+          # If not specified, Dashboard will attempt to auto discover the API server and connect
+          # to it. Uncomment only if the default does not work.
+          - --apiserver-host=http://172.16.68.132:8080   #要填写master节点的ip
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 9090
+          initialDelaySeconds: 30
+          timeoutSeconds: 30
+]# kubectl create -f ./kubernetes-dashboard.yaml  -s http://master:8080
+]# kubectl get pod --all-namespaces -s http://master:8080  确保部署成功
+]# vi kubernetes-dashboard-service.yaml
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kube-system
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 9090
+  selector:
+    k8s-app: kubernetes-dashboard
+]# kubectl create -f ./kubernetes-dashboard-service.yaml  -s http://master:8080
+]# kubectl get services --all-namespaces  不加--all-namespaces，默认只显示NAMESPACE为default的service
+NAMESPACE     NAME                   CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+default       default-http-backend   10.254.255.94   <pending>     80:31533/TCP   6h
+default       kubernetes             10.254.0.1      <none>        443/TCP        9h
+default       service-example        10.254.59.235   <pending>     80:30329/TCP   7h
+kube-system   kubernetes-dashboard   10.254.22.240   <nodes>       80:30065/TCP   3h
+此时通过访问对象kubernetes-dashboard所在的ip地址，即http://nodeip:30065就可以访问到kubernetes的dashboard
+]# vi kubernetes-dashboard-ingress.yaml  由于只实现test.chenhao就可以访问到kubernetes的dashboard，所以此处一定不能加annotations配置
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: kube-dashboard-ingress
+  namespace: kube-system
+spec:
+  rules:
+    - host: test.chenhao
+      http:
+        paths:
+          - backend:
+              serviceName: kubernetes-dashboard
+              servicePort: 80
+]# kubectl create -f ./kubernetes-dashboard-ingress.yaml  -s http://master:8080
+]# kubectl get ing --all-namespaces
+NAMESPACE     NAME                     HOSTS          ADDRESS         PORTS     AGE
+default       test-ingress             test.web       172.16.68.128   80        2h
+kube-system   kube-dashboard-ingress   test.chenhao   172.16.68.128   80        2h
+此时只要做了主机名解析，通过访问http://test.chenhao就可以访问到kubernetes的dashboard
 
+给dashboard提供https访问
+先创建私有CA
+]# cd /etc/pki/CA
+]# (umask 077; openssl genrsa -out private/cakey.pem 2048)
+]# openssl req -new -x509 -key private/cakey.pem -days 3655 -out cacert.pem -subj "/CN=kube-ca"    (要同/etc/pki/tls/openssl.cnf中的名称保持一致)
+]# mkdir certs crl newcerts 如果这3个目录没有才创建，有就不用创建了
+]# touch ./{index.txt,serial}
+]# echo 01 > serial
+]# cat serial 验证01内容是否已经生成
+其次申请签署证书
+]# vim /etc/pki/tls/openssl.cnf  最好先备份
+[req]
+req_extensions = v3_req # 这行默认注释关着的，把注释删掉即可
+#下面配置是新增的
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = test.chenhao  #让签署的证书支持test.chenhao这个域名，很关键
+]# openssl genrsa -out ingress-key.pem 2048
+]# openssl req -new -key ingress-key.pem -out ingress.csr -subj "/CN=kube-ingress" -config /etc/pki/tls/openssl.cnf
+]# openssl x509 -req -in ingress.csr -CA cacert.pem -CAkey private/cakey.pem -CAcreateserial -out certs/ingress.pem -days 365 -extensions v3_req -extfile /etc/pki/tls/openssl.cnf
+Signature ok  要确保签署成功，这里的签署方式和马哥讲的稍微不一样
+subject=/CN=kube-ingress
+Getting CA Private Key
+]# ll  /etc/pki/CA
+总用量 20
+-rw-r--r--  1 root root 1090 5月  23 21:37 cacert.pem
+-rw-r--r--  1 root root   17 5月  23 21:49 cacert.srl
+drwxr-xr-x. 2 root root   24 5月  23 21:49 certs
+drwxr-xr-x. 2 root root    6 8月   4 2017 crl
+-rw-r--r--  1 root root    0 5月  23 21:42 index.txt
+-rw-r--r--  1 root root  985 5月  23 21:44 ingress.csr
+-rw-r--r--  1 root root 1675 5月  23 21:44 ingress-key.pem
+drwxr-xr-x. 2 root root    6 8月   4 2017 newcerts
+drwx------. 2 root root   22 5月  23 21:36 private
+-rw-r--r--  1 root root    3 5月  23 21:43 serial
+]# kubectl create secret tls ingress-secret --key ingress-key.pem --cert certs/ingress.pem  自动创建配置
+secret "ingress-secret" created
+]# kubectl  get  secrets --all-namespaces  确保ingress-secret处于运行状态
+NAMESPACE     NAME                              TYPE                DATA      AGE
+default       ingress-secret                    kubernetes.io/tls   2         1m
+kube-system   kubernetes-dashboard-key-holder   Opaque              2         1d
+apiVersion: extensions/v1beta1
+最后重新部署dashboard-ingress
+]# cd /root
+]# kubectl delete -f ./kubernetes-dashboard-ingress.yaml
+]# vi kubernetes-dashboard-ingress.yaml  
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: kube-dashboard-ingress
+  namespace: kube-system
+spec:
+  tls:     #主要就是多了tls的配置
+  - hosts:
+    - test.chenhao
+  rules:
+    - host: test.chenhao
+      http:
+        paths:
+          - backend:
+              serviceName: kubernetes-dashboard
+              servicePort: 80
+]# kubectl create  -f ./kubernetes-dashboard-ingress.yaml
+]# kubectl get ing --all-namespaces  确保ingress是正常的
+NAMESPACE     NAME                     HOSTS          ADDRESS         PORTS     AGE
+kube-system   kube-dashboard-ingress   test.chenhao   172.16.68.128   80, 443   51s
+部署TLS后80端口会自动重定向到443,所以访问http://test.chenhao，自动重定向到https，同时访问到dashboard的内容
+注意事项：
+  一个Ingress只能使用一个secret(secretName段只能有一个)，也就是说只能用一个证书，更直白的说就是如果你在一个Ingress 中配置了多个域名，
+  那么使用TLS 的话必须保证证书支持该 Ingress下所有域名；并且这个secretName 一定要放在上面域名列表最后位置，否则会报错did not find expected key无法创建；
+  同时上面的 hosts 段下域名必须跟下面的 rules 中完全匹配
+  还需要注意一点就是，Kubernetes Ingress默认情况下，当你不配置证书时，会默认给你一个TLS证书的，也就是说你Ingress中配置错了，比如写了2个secretName、
+  或者hosts段中缺了某个域名，那么对于写了多个secretName的情况，所有域名全会走默认证书；对于hosts缺了某个域名的情况，缺失的域名将会走默认证书，
+  部署时一定要验证一下证书，不能 “有了就行”；更新 Ingress 证书可能需要等一段时间才会生效
 
 
 

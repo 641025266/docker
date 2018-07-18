@@ -1,6 +1,19 @@
-﻿docker内部没有内核，docker有三个核心概念镜像，容器，仓库一定要理解。
+﻿如果是在mac上安装的docker，配置文件是在如下路径
+~ cat /Users/chenhao/.docker/daemon.json
+{
+  "debug" : true,
+  "insecure-registries" : [
+    "106.75.24.200:5000"
+  ],
+  "experimental" : true
+}
+~ pwd
+/Users/chenhao
+
+docker内部没有内核，docker有三个核心概念镜像，容器，仓库一定要理解。
 我们都知道，操作系统分为内核和用户空间。对于 Linux 而言，内核启动后，会挂载 root文件系统为其提供用户空间支持。而 Docker 镜像（Image），就相当于是一个 root 文件系统。
 比如官方镜像 ubuntu:16.04 就包含了完整的一套 Ubuntu 16.04 最小系统的 root 文件系统。
+
 lxc包含如下3个核心概念：
     chroot，根切换
     namespace，6个名称空间（即在同一个名称内核下，有多个用户空间）
@@ -371,6 +384,7 @@ bin   dev   etc   home  proc  root  run   sys   tmp   usr   var
 registry有两种：
       docker hub：对应的就是hub.docker.com，本质就是一个public registry，在docker hub上创建一个账号后可以把自己的镜像推到自己的账号里面		
       private registry
+harbor也相当于是一个私有镜像仓库，只是在此基础上提高了镜像使用率
 私有仓库的服务器端					
 (1) 安装docker-registry程序包；
     yum install docker-registry -y  (实际安装的是docker-distribution）				
@@ -433,57 +447,55 @@ b6e0bef3e75c: Pushed
 e58f214fae4f: Pushed
 2b0fb280b60d: Pushed
 1.0.0: digest: sha256:2762baaf74912cacc884b2a8799e0b69edb8eee72b764308d21bf2138623dfba size: 2202
-[root@qbs ~]# curl http://10.10.214.10:5000/v2/_catalog
-{"repositories":["kafka"]}
-上面registry虽然已经运行起来了，但是如果想用push命令上传镜像是会报错的，需要在配置文件中指定registry的地址。在/etc/sysconfig/docker文件中添加一下配置：
-[plain] view plain copy
-ADD_REGISTRY='--insecure-registry 192.168.0.100:5000' 
-]# curl http://10.10.214.10:5000/v2/kafka/tags/list
-{"name":"kafka","tags":["1.0.0"]}
-root@f06b2fe7ee1f:/# cat  /etc/docker/registry/config.yml
+
+docker registry配置说明
+]# docker pull registry:2.4.1
+root@f06b2fe7ee1f:/# vi  /etc/docker/registry/config.yml
 version: 0.1
 log:
   fields:
     service: registry
 storage:
     delete:
-        enabled: true
+        enabled: true  必须设置为true，否则不能删除镜像
     cache:
         blobdescriptor: inmemory
     filesystem:
         rootdirectory: /var/lib/registry
 http:
     addr: :5000
-    headers:
+   headers:
         X-Content-Type-Options: [nosniff]
 health:
   storagedriver:
     enabled: true
     interval: 10s
     threshold: 3
-method	path	Entity	Description
-GET	/v2/	Base	Check that the endpoint implements Docker Registry API V2.
-GET	/v2/<name>/tags/list	Tags	Fetch the tags under the repository identified by name.
-GET	/v2/<name>/manifests/<reference>	Manifest	Fetch the manifest identified by nameand referencewhere referencecan be a tag or digest. A HEADrequest can also be issued to this endpoint to obtain resource information without receiving all data.
-PUT	/v2/<name>/manifests/<reference>	Manifest	Put the manifest identified by nameand referencewhere referencecan be a tag or digest.
-DELETE	/v2/<name>/manifests/<reference>	Manifest	Delete the manifest identified by nameand reference. Note that a manifest can only be deleted by digest.
-GET	/v2/<name>/blobs/<digest>	Blob	Retrieve the blob from the registry identified bydigest. A HEADrequest can also be issued to this endpoint to obtain resource information without receiving all data.
-DELETE	/v2/<name>/blobs/<digest>	Blob	Delete the blob identified by nameand digest
-POST	/v2/<name>/blobs/uploads/	Initiate Blob Upload	Initiate a resumable blob upload. If successful, an upload location will be provided to complete the upload. Optionally, if thedigest parameter is present, the request body will be used to complete the upload in a single request.
-GET	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Retrieve status of upload identified byuuid. The primary purpose of this endpoint is to resolve the current status of a resumable upload.
-PATCH	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Upload a chunk of data for the specified upload.
-PUT	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Complete the upload specified by uuid, optionally appending the body as the final chunk.
-DELETE	/v2/<name>/blobs/uploads/<uuid>	Blob Upload	Cancel outstanding upload processes, releasing associated resources. If this is not called, the unfinished uploads will eventually timeout.
-GET	/v2/_catalog	Catalog	Retrieve a sorted, json list of repositories available in the registry.
-Docker的数据卷Data Volume
-
+]# curl http://10.10.214.10:5000/v2/_catalog  查看所有的镜像
+{"repositories":["centos","influxdb","jenkins","local_common-etcd","local_gray-etcd","local_mongo","local_mysql","memcached","quay.io/coreos/etcd"]}
+删除镜像方式1：
+]# curl http://10.10.214.10:5000/v2/centos/tags/list
+{"name":"centos","tags":["7.3","wakecommnet"]}
+]# curl --header 'Accept: application/vnd.docker.distribution.manifest.v2+json' -I -XGET  10.10.214.10:5000/v2/centos/manifests/wakecommnet 获取hash码
+HTTP/1.1 200 OK
+Content-Length: 1371
+Content-Type: application/vnd.docker.distribution.manifest.v2+json
+Docker-Content-Digest: sha256:7c1666a4f300acec820323195a6253572808c26fd0956cfac61cc24fb146ecc3
+Docker-Distribution-Api-Version: registry/2.0
+Etag: "sha256:7c1666a4f300acec820323195a6253572808c26fd0956cfac61cc24fb146ecc3"
+X-Content-Type-Options: nosniff
+Date: Fri, 27 Apr 2018 09:56:03 GMT
+]# curl -XDELETE 10.10.214.10:5000/v2/centos/manifests/sha256:7c1666a4f300acec820323195a6253572808c26fd0956cfac61cc24fb146ecc3  此时只删除了元数据，没有删除层数据
+]# docker exec -it registry1 /bin/bash
+root@405bbb8625a8:/# registry garbage-collect  /etc/docker/registry/config.yml   进入到registry容器做垃圾回收，也就是删除层数据
+root@405bbb8625a8:/# du -sh /var/lib/registry  观察大小是否变化
+684M	/var/lib/registry
+删除镜像方式2：
 ]# docker exec -it registry1  rm -rf /var/lib/registry/docker/registry/v2/repositories/local_mysql
 ]# docker exec -it registry1  du -sh  /var/lib/registry/
 99M	/var/lib/registry/
-[root@qbs docker]# docker exec -it registry1  registry garbage-collect /etc/docker/registry/config.yml
 
-
-是供一个或多个容器使用的文件或目录，有多种特性：
+Docker的数据卷Data Volume是供一个或多个容器使用的文件或目录，有多种特性：
       数据卷本质是映射了宿主机的一个目录，所有的数据都是保存在该宿主机的目录里面，因此实现了持久存储				
       可以共享于多个容器之间；
       对数据卷的修改会立即生效；
@@ -533,8 +545,7 @@ docker网络
            -net=host
       container模式
       none模式，表示不使用网络
-容器互联：
-   run   --link
+容器互联：run   --link
 58.2-1
 回顾：
    容器技术；
@@ -620,10 +631,9 @@ eth0      Link encap:Ethernet  HWaddr 02:42:AC:11:00:02
 [root@compute1 ~]# docker run -it --rm --network host centos:latest 
 [root@compute1 /]# yum install -y iproute   centos镜像没有ip和ifconfig命令，但是通过--network host就可以通过yum命令安装了
 [root@compute1 /]# ip addr show             此时该命令显示出来的内容和宿主机192.168.139.181上面显示的内容是一样
+
 容器间的依赖关系：
-   链接机制：linking
-     --link
-     同时也表明了先后关系，被依赖的要先启动	
+链接机制：--link  同时也表明了先后关系，被依赖的要先启动	
 容器互联的使用案例：
 [root@www ~]# docker run -it   busybox  /bin/sh
 / # ifconfig 
