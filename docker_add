@@ -37,46 +37,6 @@ function quit() { [native code] }
 > quit()			
 
 			
-docker安装kafka，在docker官网搜索wurstmeister，可以获取指定版本的kafka和zookeeper
-1、启动zookeeper
-docker run -d --name zookeeper -p 2181:2181  -t wurstmeister/zookeeper  
-2、启动kafka
-docker run -d  --name kafka -e HOST_IP=localhost -e KAFKA_ADVERTISED_PORT=9092 -e KAFKA_BROKER_ID=1 -e ZK=zk -p 9092:9092  --link zookeeper:zk -t wurstmeister/kafka  
---link实际就是在kafka容器的/etc/hosts增加了一条解析条目，具体请参考docker的容器互联使用案例
-3、测试发送消息
-docker exec -it ${CONTAINER ID} /bin/bash   进入kafka容器内部 
-cd opt/kafka_2.11-0.10.1.1/   
-创建topic
-bin/kafka-topics.sh --create --zookeeper zookeeper:2181 --replication-factor 1 --partitions 1 --topic mykafka  
-运行生成者，输入信息
-bin/kafka-console-producer.sh --broker-list localhost:9092 --topic mykafka
-获取信息，说明配置成功
-旧版本命令
-bin/kafka-console-consumer.sh --zookeeper zookeeper:2181 --topic mykafka --from-beginning 
-bin/kafka-console-consumer.sh --zookeeper 10.10.214.10:2181 --topic mykafka --from-beginning 
-新版本命令
-bin/kafka-console-consumer.sh --bootstrap-server  10.10.214.10:9092 --topic mykafka
-查看有哪些topic
-kafka-topics.sh --list  --zookeeper zk:2181
-查找kafka的版本						
-find ./libs/ -name \*kafka_\* | head -1 | grep -o '\kafka[^\n]*'
-from your kafka folder (and it will do the same for you). It will return you something like kafka_2.9.2-0.8.1.1.jar.asc where 0.8.1.1 is your kafka version
-
-外网无法访问kafka原因：
- 　1)kafka配置文件server.properties中，host.name只绑定在了内部的IP上面，对外的网卡无法访问，也就是物理业务系统服务器上面并不能识别到kafka服务名；
-　   把host.name设置为空的话kafka会监听端口在所有的网卡上绑定。但是在外网访问时，客户端又遇到了“java.nio.channels.ClosedChannelException”异常信息，
-     server端用tcpdump分析的时候发现客户端有传递kafka所在容器的服务名过来。在client里断点跟踪一下发现是findLeader的时候返回的元信息是容器服务名而不是IP。
-     业务系统客户端无法解析这个机器名所以出现了前面的异常。
-　  在server.properties 里还有另一个参数是解决这个问题的， advertised.host.name参数用来配置返回的host.name值，把这个参数配置为局域网IP地址即可。
-   这个参数默认没有启用，默认是返回的java.net.InetAddress.getCanonicalHostName的值。
-　 除了IP之外，还有PORT，外网对应的PORT也需要修改。
-　　针对docker容器可以用环境变量参数将具体的参数传递进去：
-    KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://xxx.xxx.xxx.xxx：port （局域网宿主机的IP地址而非容器的IP，及暴露出来的端口）
-    针对局域网向公网IP端口暴露的话，这修改配置文件,加入以下配置：
-　　advertised.listeners=PLAINTEXT://xxx.xxx.xxx.xxx:port　
-　　2)当Kafka broker启动时，它会在ZK上注册自己的IP和端口号，客户端就通过这个IP和端口号来连接。此时就需要显示指定 advertised.host.name, advertised.listeners参数，
-    让注册到ZK上的IP是外部IP。需要在server.properties 配置文件里增加如下配置（版本0.10.x broker及之后的新版本）：
-　　新版本0.10.x broker配置弃用了advertised.host.name和 advertised.port这两个个配置项，就配置advertised.listeners就可以了。
 补充：docker run -e的案例
 ]# docker run -it -e name=chenhao busybox  实际上就相当于执行了export name=chenhao
 / # echo $name
